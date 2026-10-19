@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { DEFAULT_SETTINGS, state } from './state';
 import { applyTransform } from './view';
+import type { Settings } from './types';
+import { applyI18n, t } from './i18n';
 
 const overlay = document.getElementById('settings') as HTMLDivElement;
 const closeBtn = document.getElementById('settings-close') as HTMLButtonElement;
@@ -10,20 +12,98 @@ const autosaveInput = document.getElementById('set-autosave') as HTMLInputElemen
 const closeSelect = document.getElementById('set-close') as HTMLSelectElement;
 const gpuInput = document.getElementById('set-gpu') as HTMLInputElement;
 const backgroundSelect = document.getElementById('set-background') as HTMLSelectElement;
+const themeSelect = document.getElementById('set-theme') as HTMLSelectElement;
+const languageSelect = document.getElementById('set-language') as HTMLSelectElement;
+const exportBgInput = document.getElementById('set-export-bg') as HTMLInputElement;
 const assocBtn = document.getElementById('assoc-toggle') as HTMLButtonElement;
 const assocState = document.getElementById('assoc-state') as HTMLSpanElement;
 const formStatus = document.getElementById('settings-status') as HTMLDivElement;
+const shortcutList = document.getElementById('shortcut-list') as HTMLDivElement;
 
 let assocEnabled = false;
 let assocSupported = false;
 let onSaved: () => void = () => {};
+let pendingShortcuts: Record<string, string> = {};
+let recording: string | null = null;
+
+const SHORTCUT_ACTIONS: { id: string; label: string; def: string }[] = [
+  { id: 'select', label: '选择', def: 'v' },
+  { id: 'lasso', label: '套索', def: 'q' },
+  { id: 'pen', label: '画笔', def: 'p' },
+  { id: 'highlighter', label: '荧光笔', def: 'h' },
+  { id: 'eraser', label: '橡皮', def: 'e' },
+  { id: 'text', label: '文字', def: 't' },
+  { id: 'sticky', label: '便签', def: 's' },
+  { id: 'rect', label: '矩形', def: 'r' },
+  { id: 'ellipse', label: '椭圆', def: 'o' },
+  { id: 'arrow', label: '箭头', def: 'a' },
+  { id: 'line', label: '直线', def: 'l' }
+];
+
+const RESERVED = new Set([
+  'ctrl+s', 'ctrl+o', 'ctrl+n', 'ctrl+z', 'ctrl+y', 'ctrl+a', 'ctrl+d', 'ctrl+c', 'ctrl+x', 'ctrl+v',
+  'ctrl+e', 'ctrl+p', 'ctrl+f', 'ctrl+0', 'ctrl+=', 'ctrl+-', 'ctrl+shift+s', 'ctrl+shift+c', 'ctrl+shift+f'
+]);
+
+export function applyTheme(theme: 'light' | 'dark'): void {
+  document.body.classList.toggle('dark', theme === 'dark');
+}
+
+export function currentShortcuts(): Record<string, string> {
+  const out: Record<string, string> = {};
+  const saved = state.settings.shortcuts || {};
+  for (const action of SHORTCUT_ACTIONS) out[action.id] = saved[action.id] || action.def;
+  return out;
+}
 
 function fillForm(): void {
   autosaveInput.value = String(state.settings.autosaveDelay);
   closeSelect.value = state.settings.closeBehavior;
   gpuInput.checked = state.settings.disableGpu;
   backgroundSelect.value = state.settings.background;
+  themeSelect.value = state.settings.theme;
+  languageSelect.value = state.settings.language;
+  exportBgInput.checked = state.settings.exportBackground;
+  pendingShortcuts = { ...state.settings.shortcuts };
+  renderShortcuts();
   void refreshAssociation();
+}
+
+function renderShortcuts(): void {
+  shortcutList.replaceChildren();
+  for (const action of SHORTCUT_ACTIONS) {
+    const row = document.createElement('div');
+    row.className = 'shortcut-row' + (recording === action.id ? ' recording' : '');
+    const label = document.createElement('span');
+    label.textContent = action.label;
+    const key = document.createElement('span');
+    key.textContent = pendingShortcuts[action.id] || action.def;
+    const button = document.createElement('button');
+    button.textContent = recording === action.id ? '按键…' : t('settings.record');
+    button.addEventListener('click', () => {
+      recording = recording === action.id ? null : action.id;
+      renderShortcuts();
+    });
+    const clear = document.createElement('button');
+    clear.textContent = t('settings.default');
+    clear.addEventListener('click', () => {
+      delete pendingShortcuts[action.id];
+      renderShortcuts();
+    });
+    row.append(label, key, button, clear);
+    shortcutList.appendChild(row);
+  }
+}
+
+function comboFromEvent(e: KeyboardEvent): string | null {
+  const parts: string[] = [];
+  if (e.ctrlKey || e.metaKey) parts.push('ctrl');
+  if (e.altKey) parts.push('alt');
+  if (e.shiftKey) parts.push('shift');
+  const key = e.key.toLowerCase();
+  if (['control', 'shift', 'alt', 'meta'].includes(key)) return null;
+  parts.push(key === ' ' ? 'space' : key);
+  return parts.join('+');
 }
 
 async function refreshAssociation(): Promise<void> {
@@ -32,8 +112,8 @@ async function refreshAssociation(): Promise<void> {
     assocSupported = info.supported;
     assocEnabled = info.enabled;
     assocBtn.disabled = !assocSupported;
-    assocBtn.textContent = info.enabled ? '移除 .wbc 关联' : '注册 .wbc 关联';
-    assocState.textContent = !assocSupported ? '仅 Windows 支持' : info.enabled ? '已注册（当前用户）' : '未注册';
+    assocBtn.textContent = info.enabled ? t('assoc.remove') : t('assoc.register');
+    assocState.textContent = !assocSupported ? t('assoc.onlyWin') : info.enabled ? t('assoc.on') : t('assoc.off');
   } catch {
     assocSupported = false;
     assocBtn.disabled = true;
@@ -52,7 +132,7 @@ export function closeSettings(): void {
   overlay.hidden = true;
 }
 
-function readForm(): { autosaveDelay: number; closeBehavior: 'ask' | 'save' | 'discard'; disableGpu: boolean; background: 'dots' | 'grid' | 'plain' | 'cream' } {
+function readForm(): Partial<Settings> {
   const delay = Math.min(60, Math.max(0, Math.round(Number(autosaveInput.value) || 0)));
   const closeValue = closeSelect.value;
   const bg = backgroundSelect.value;
@@ -60,11 +140,16 @@ function readForm(): { autosaveDelay: number; closeBehavior: 'ask' | 'save' | 'd
     autosaveDelay: delay,
     closeBehavior: closeValue === 'save' || closeValue === 'discard' ? closeValue : 'ask',
     disableGpu: gpuInput.checked,
-    background: bg === 'dots' || bg === 'grid' || bg === 'plain' || bg === 'cream' ? bg : 'dots'
+    background: bg === 'dots' || bg === 'grid' || bg === 'plain' || bg === 'cream' ? bg : 'dots',
+    theme: themeSelect.value === 'dark' ? 'dark' : 'light',
+    language: languageSelect.value === 'en' ? 'en' : 'zh',
+    exportBackground: exportBgInput.checked,
+    shortcuts: { ...pendingShortcuts }
   };
 }
 
 function applyLocal(): void {
+  applyTheme(state.settings.theme);
   applyTransform();
   onSaved();
 }
@@ -75,12 +160,45 @@ export function installSettings(saved: () => void): void {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) closeSettings();
   });
-  overlay.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
+  overlay.addEventListener(
+    'keydown',
+    (e) => {
+      if (!recording) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeSettings();
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        recording = null;
+        formStatus.textContent = '';
+        renderShortcuts();
+        return;
+      }
+      const combo = comboFromEvent(e);
+      if (!combo) return;
       e.preventDefault();
-      closeSettings();
-    }
-  });
+      e.stopPropagation();
+      if (RESERVED.has(combo)) {
+        formStatus.textContent = `“${combo}” 已被系统快捷键占用`;
+        return;
+      }
+      const conflict = SHORTCUT_ACTIONS.find(
+        (action) => action.id !== recording && (pendingShortcuts[action.id] || action.def) === combo
+      );
+      if (conflict) {
+        formStatus.textContent = `“${combo}” 已用于“${conflict.label}”`;
+        return;
+      }
+      if (recording) pendingShortcuts[recording] = combo;
+      recording = null;
+      formStatus.textContent = '已记录快捷键，点击“保存”生效';
+      renderShortcuts();
+    },
+    true
+  );
   saveBtn.addEventListener('click', async () => {
     const patch = readForm();
     const result = await window.api.setSettings(patch);
@@ -90,6 +208,7 @@ export function installSettings(saved: () => void): void {
     }
     state.settings = result;
     applyLocal();
+    applyI18n();
     formStatus.textContent = '已保存' + (patch.disableGpu !== undefined ? '（GPU 设置重启后生效）' : '');
   });
   resetBtn.addEventListener('click', () => {
@@ -97,6 +216,11 @@ export function installSettings(saved: () => void): void {
     closeSelect.value = DEFAULT_SETTINGS.closeBehavior;
     gpuInput.checked = DEFAULT_SETTINGS.disableGpu;
     backgroundSelect.value = DEFAULT_SETTINGS.background;
+    themeSelect.value = DEFAULT_SETTINGS.theme;
+    languageSelect.value = DEFAULT_SETTINGS.language;
+    exportBgInput.checked = DEFAULT_SETTINGS.exportBackground;
+    pendingShortcuts = {};
+    renderShortcuts();
     formStatus.textContent = '已恢复默认值，点击“保存”生效';
   });
   assocBtn.addEventListener('click', async () => {

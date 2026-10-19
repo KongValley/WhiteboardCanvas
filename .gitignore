@@ -6,3 +6,6 @@ tmp/
 builder-debug.yml
 Thumbs.db
 .DS_Store
+test-dist/
+data/
+test/bench-latest.json

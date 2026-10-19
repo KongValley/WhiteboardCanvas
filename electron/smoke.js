@@ -15,6 +15,10 @@ module.exports = async function runSmoke(win) {
   const tmpBad = path.join(os.tmpdir(), `wbc-smoke-${stamp}-bad.wbc`);
   const tmpBadZip = path.join(os.tmpdir(), `wbc-smoke-${stamp}-badzip.wbc`);
   const tmpPdf = path.join(os.tmpdir(), `wbc-smoke-${stamp}.pdf`);
+  const tmpSvg = path.join(os.tmpdir(), `wbc-smoke-${stamp}.svg`);
+  const tmpPages = path.join(os.tmpdir(), `wbc-smoke-${stamp}-pages.wbc`);
+  const tmpRepairJson = path.join(os.tmpdir(), `wbc-smoke-${stamp}-repair.wbc`);
+  const tmpRepairZip = path.join(os.tmpdir(), `wbc-smoke-${stamp}-repairzip.wbc`);
   const userData = app.getPath('userData');
   const backupsDir = path.join(userData, 'backups');
   let failures = 0;
@@ -34,8 +38,10 @@ module.exports = async function runSmoke(win) {
       const buf = fs.readFileSync(file);
       if (zip.isZip(buf)) {
         const files = zip.read(buf);
-        const doc = files.get('doc.json');
-        return doc ? JSON.parse(doc.toString('utf8')) : null;
+        const parsed = files.get('doc.json');
+        const doc = parsed ? JSON.parse(parsed.toString('utf8')) : null;
+        if (doc && !doc.elements && Array.isArray(doc.pages)) doc.elements = doc.pages.flatMap((page) => page.elements || []);
+        return doc;
       }
       return JSON.parse(buf.toString('utf8'));
     } catch (err) {
@@ -56,7 +62,7 @@ module.exports = async function runSmoke(win) {
   try {
     await run("new Promise(function(resolve){var t=setInterval(function(){if(window.__test){clearInterval(t);resolve(true);}},20);})");
     const buttons = await run("document.querySelectorAll('#toolbar button').length");
-    check('toolbar-10-buttons', buttons === 10, buttons);
+    check('toolbar-p2-buttons', buttons === 16, buttons);
 
     const initial = await run('__test.count()');
     check('initial-empty', initial === 0, initial);
@@ -545,6 +551,163 @@ module.exports = async function runSmoke(win) {
     const logText = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
     check('local-log', logText.includes('应用启动') && logText.includes('保存文档'), { hasStartup: logText.includes('应用启动') });
 
+    // P2：更多形状 / 旋转 / 分组 / 锁定 / 面板 / 搜索 / 套索 / 格式刷 / 便签 / 富文本 / 连接线 / 页面 / SVG / 裁剪
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    const p2poly = await run("__test.addPoly('triangle', 100, 100, 100, 100)");
+    await run('__test.setFill(' + j(p2poly) + ", 'rgba(37,99,235,0.3)')");
+    const p2hit = await run('__test.hitTest(150, 160)');
+    await run('__test.setRotation(' + j(p2poly) + ', 45)');
+    const p2rot = await run('__test.el(' + j(p2poly) + ')');
+    const p2groupA = await run("__test.addShape('rect', 300, 100, 80, 80)");
+    const p2groupB = await run("__test.addShape('rect', 420, 100, 80, 80)");
+    await run('__test.select(' + j([p2groupA, p2groupB]) + ')');
+    await run('__test.groupSelection()');
+    await run('__test.select(' + j([p2groupA]) + ')');
+    await run('__test.nudge(5, 0)');
+    const p2grouped = await run('__test.elements()');
+    const p2moved = p2grouped.filter((el) => el.id === p2groupA || el.id === p2groupB).map((el) => el.x);
+    await run('__test.setLocked(' + j(p2groupA) + ', true)');
+    await run('__test.select(' + j([p2groupA]) + ')');
+    const p2lockedHit = await run('__test.hitTest(400, 140)');
+    await run('__test.setLocked(' + j(p2groupA) + ', false)');
+    check(
+      'p2-shape-rotation-group-lock',
+      p2hit === 'poly' && p2rot && Math.abs(p2rot.rotation - 45) < 0.001 && p2moved[0] > 300 && p2lockedHit === null,
+      { p2hit, p2rot, p2moved, p2lockedHit }
+    );
+
+    await run('__test.reset()');
+    await run("__test.addText('搜索目标', 100, 100)");
+    await run("__test.addShape('rect', 300, 100, 80, 80)");
+    const p2search = await run("__test.search('搜索目标')");
+    await run('togglePanels = true');
+    const p2panels = await run(
+      "(() => {document.getElementById('panel-btn').click();const rows=document.querySelectorAll('.layer-row').length;" +
+        "const tabs=document.querySelectorAll('.panel-tabs button');tabs[1].click();const history=document.querySelectorAll('.history-row').length;" +
+        "document.getElementById('panel-btn').click();return {rows,history,label:__test.elementLabel(__test.order()[0])};})()"
+    );
+    const p2lasso = await run(
+      '__test.lasso([[90,90],[280,90],[280,220],[90,220]], false)'
+    );
+    check('p2-panels-search-lasso', p2search.length === 1 && p2panels.rows === 2 && p2panels.history > 0 && p2lasso.length >= 1, { p2search, p2panels, p2lasso });
+
+    await run('__test.reset()');
+    const fmtA = await run("__test.addShape('rect', 100, 100, 80, 80)");
+    await run('__test.setFill(' + j(fmtA) + ", 'rgba(220,38,38,0.3)')");
+    await run('__test.select(' + j([fmtA]) + ')');
+    await run('__test.copyFormat()');
+    const fmtB = await run("__test.addShape('rect', 300, 100, 80, 80)");
+    await run('__test.pasteFormat(' + j(fmtB) + ')');
+    const fmtEl = await run('__test.el(' + j(fmtB) + ')');
+    const stickyId = await run("__test.addSticky('便签内容', 500, 100)");
+    const stickyEl = await run('__test.el(' + j(stickyId) + ')');
+    const richId = await run("__test.addText('富文本', 100, 300)");
+    await run('__test.setTextStyle(' + j(richId) + ", {bold:true, align:'center', underline:true})");
+    const richEl = await run('__test.el(' + j(richId) + ')');
+    check(
+      'p2-format-sticky-rich',
+      fmtEl && fmtEl.fill === 'rgba(220,38,38,0.3)' && stickyEl && stickyEl.sticky === true && richEl && richEl.bold === true && richEl.align === 'center',
+      { fmtEl, stickyEl, richEl }
+    );
+
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    const connA = await run("__test.addShape('rect', 100, 100, 80, 80)");
+    const connB = await run("__test.addShape('rect', 400, 100, 80, 80)");
+    const connId = await run('__test.connect(' + j(connA) + ',' + j(connB) + ')');
+    const connBefore = await run('__test.el(' + j(connId) + ')');
+    await run('__test.move(' + j(connA) + ', 0, 100)');
+    const connAfter = await run('__test.el(' + j(connId) + ')');
+    check(
+      'p2-connector-follow',
+      connBefore && connAfter && Math.abs(connBefore.y1 - connAfter.y1) > 10 && connAfter.fromId === connA && connAfter.toId === connB,
+      { connBefore, connAfter }
+    );
+
+    await run('__test.reset()');
+    await run("__test.addText('页一', 100, 100)");
+    await run("__test.addPage('第二页')");
+    await run('__test.switchPage(1)');
+    await run("__test.addText('页二', 100, 100)");
+    const p2pages = await run('__test.pageNames()');
+    await run('__test.saveTo(' + j(tmpPages) + ')');
+    const pagesDoc = readDoc(tmpPages);
+    const p2history = await run(
+      '(() => {const labels=__test.history();__test.jumpHistory(0);return {labels,count:__test.count()};})()'
+    );
+    check(
+      'p2-pages-history',
+      p2pages.length === 2 && pagesDoc && pagesDoc.pages && pagesDoc.pages.length === 2 &&
+        pagesDoc.pages[1].elements.length === 1 && p2history.labels.length > 0 && p2history.count === 0,
+      { p2pages, pages: pagesDoc && pagesDoc.pages && pagesDoc.pages.length, p2history }
+    );
+
+    await run('__test.reset()');
+    await run("__test.addShape('ellipse', 100, 100, 120, 80)");
+    const p2svg = await run('__test.exportSvgTo(' + j(tmpSvg) + ')');
+    let svgOk = false;
+    try {
+      const text = fs.readFileSync(tmpSvg, 'utf8');
+      svgOk = p2svg === true && text.startsWith('<?xml') && text.includes('<svg') && text.includes('<ellipse');
+    } catch {
+      svgOk = false;
+    }
+    const tinyImg = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const cropId = await run('__test.addImage(' + j(tinyImg) + ', 300, 300)');
+    const cropped = await run('__test.crop(' + j(cropId) + ', {x:0,y:0,w:0.5,h:0.5}, true, false)');
+    const cropEl = await run('__test.el(' + j(cropId) + ')');
+    check('p2-svg-crop', svgOk && cropped === true && cropEl && cropEl.crop && cropEl.crop.w === 0.5, { svgOk, cropped, cropEl });
+
+    // P2：主题/语言/图标/无障碍/设置持久化
+    await run('__test.reset()');
+    const focusId = await run("__test.addText('焦点', 100, 100)");
+    const uiState = await run(
+      "(async () => {const ok=await __test.applySettings({theme:'dark',language:'en'});" +
+        "const dark=document.body.classList.contains('dark');" +
+        "const label=document.querySelector('button[data-tool=\"pen\"]').title;" +
+        "const icons=document.querySelectorAll('#toolbar svg').length;" +
+        "const focus=__test.focusElement(" + j(focusId) + ");" +
+        "const aria=document.querySelector('[data-id=\"" + focusId + "\"]').getAttribute('aria-label');" +
+        "const focusAttr=document.querySelector('[data-id=\"" + focusId + "\"]').tabIndex;" +
+        "await __test.applySettings({theme:'light',language:'zh'});" +
+        "return {ok,dark,label,icons,focus,aria,focusAttr,restored:!document.body.classList.contains('dark')};})()"
+    );
+    check(
+      'p2-theme-lang-icons-a11y',
+      uiState.ok === true && uiState.dark === true && uiState.label === 'Pen' && uiState.icons >= 16 &&
+        uiState.focus === true && uiState.focusAttr === -1 && uiState.restored === true,
+      uiState
+    );
+
+    // P2：损坏文件修复（截断 JSON 与截断 ZIP）
+    fs.writeFileSync(
+      tmpRepairJson,
+      '{"app":"whiteboard-canvas","version":3,"elements":[' +
+        '{"id":"r1","type":"rect","x":0,"y":0,"w":50,"h":50,"stroke":"#000","strokeWidth":2},' +
+        '{"id":"r2","type":"ellipse","x":60,"y":0,"w":50,"h":50,"stroke":"#000","strokeWidth":2}',
+      'utf8'
+    );
+    const repairDoc = {
+      app: 'whiteboard-canvas',
+      version: 3,
+      pages: [{ id: 'x', name: '页', elements: [{ id: 'z', type: 'rect', x: 0, y: 0, w: 20, h: 20, stroke: '#000', strokeWidth: 1 }] }]
+    };
+    const completeZip = zip.write([{ name: 'doc.json', data: Buffer.from(JSON.stringify(repairDoc)) }]);
+    fs.writeFileSync(tmpRepairZip, completeZip.subarray(0, completeZip.length - 8));
+    await run('__test.reset()');
+    const repair1 = await run('__test.openFrom(' + j(tmpRepairJson) + ')');
+    const repair1Count = await run('__test.count()');
+    await run('__test.reset()');
+    const repair2 = await run('__test.openFrom(' + j(tmpRepairZip) + ')');
+    const repair2Count = await run('__test.count()');
+    check('p2-corruption-repair', repair1 === true && repair1Count === 2 && repair2 === true && repair2Count === 1, {
+      repair1,
+      repair1Count,
+      repair2,
+      repair2Count
+    });
+
     // 打印参数校验（真实打印对话框由人工验证）
     const badPrint = await run("window.api.printPng('bad', 'pdf')");
     check('print-validation', !!badPrint && typeof badPrint.error === 'string', badPrint);
@@ -614,7 +777,7 @@ module.exports = async function runSmoke(win) {
     console.log('FAIL smoke-exception ' + String((err && err.message) || err));
   }
 
-  for (const file of [tmpWbc, tmpPng, tmpZip, tmpSelPng, tmpV1, tmpBad, tmpBadZip, tmpPdf]) {
+  for (const file of [tmpWbc, tmpPng, tmpZip, tmpSelPng, tmpV1, tmpBad, tmpBadZip, tmpPdf, tmpSvg, tmpPages, tmpRepairJson, tmpRepairZip]) {
     try {
       fs.unlinkSync(file);
     } catch {

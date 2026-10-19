@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "outDir": "test-dist",
+    "rootDir": ".",
+    "declaration": false,
+    "sourceMap": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/model.ts", "src/state.ts", "src/types.d.ts"]
+}

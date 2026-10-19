@@ -2,10 +2,21 @@
 import { El, Tool, sanitizeEl } from './model';
 import type { Settings } from './types';
 
+export interface Page {
+  id: string;
+  name: string;
+  elements: El[];
+}
+
 export interface Doc {
   app: 'whiteboard-canvas';
-  version: 2;
+  version: 3;
   elements: El[];
+}
+
+interface HistEntry {
+  doc: Doc;
+  label: string;
 }
 
 export const HISTORY_LIMIT = 100;
@@ -16,11 +27,22 @@ export const DEFAULT_SETTINGS: Settings = {
   autosaveDelay: 1,
   closeBehavior: 'ask',
   disableGpu: false,
-  background: 'dots'
+  background: 'dots',
+  theme: 'light',
+  language: 'zh',
+  exportBackground: true,
+  template: 'blank',
+  shortcuts: {}
 };
 
+export function uidPage(): string {
+  return 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
 export const state = {
-  doc: { app: 'whiteboard-canvas', version: 2, elements: [] } as Doc,
+  doc: { app: 'whiteboard-canvas', version: 3, elements: [] } as Doc,
+  pages: [{ id: 'p1', name: '页面 1', elements: [] }] as Page[],
+  activePage: 0,
   filePath: null as string | null,
   dirty: false,
   revision: 0,
@@ -39,8 +61,8 @@ const titleEl = document.getElementById('title') as HTMLDivElement;
 const statusMsgEl = document.getElementById('status-msg') as HTMLSpanElement;
 const statusInfoEl = document.getElementById('status-info') as HTMLSpanElement;
 
-const undoStack: Doc[] = [];
-const redoStack: Doc[] = [];
+let undoStack: HistEntry[] = [];
+let redoStack: HistEntry[] = [];
 let autosaveTimer: number | null = null;
 let recoveryTimer: number | null = null;
 let statusHook: () => void = () => {};
@@ -76,28 +98,34 @@ export function updateTitle(): void {
   document.title = prefix + name + ' — 白板画布';
 }
 
+/** 把当前编辑区同步回当前页 */
+export function syncActivePage(): void {
+  const page = state.pages[state.activePage];
+  if (page) page.elements = state.doc.elements;
+}
+
 export function clearHistory(): void {
-  undoStack.length = 0;
-  redoStack.length = 0;
+  undoStack = [];
+  redoStack = [];
 }
 
 export function beginMutation(): Doc {
   return structuredClone(state.doc);
 }
 
-export function commitMutation(before: Doc | null, changed = true): void {
+export function commitMutation(before: Doc | null, changed = true, label = '编辑'): void {
   if (!before || !changed) return;
-  undoStack.push(before);
+  undoStack.push({ doc: before, label });
   if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
-  redoStack.length = 0;
+  redoStack = [];
   markDirty();
 }
 
 export function undo(): boolean {
   const prev = undoStack.pop();
   if (!prev) return false;
-  redoStack.push(structuredClone(state.doc));
-  state.doc = prev;
+  redoStack.push({ doc: structuredClone(state.doc), label: prev.label });
+  state.doc = prev.doc;
   markDirty();
   return true;
 }
@@ -105,42 +133,150 @@ export function undo(): boolean {
 export function redo(): boolean {
   const next = redoStack.pop();
   if (!next) return false;
-  undoStack.push(structuredClone(state.doc));
-  state.doc = next;
+  undoStack.push({ doc: structuredClone(state.doc), label: next.label });
+  state.doc = next.doc;
   markDirty();
   return true;
 }
 
-export function serialize(): string {
-  return JSON.stringify(state.doc);
+export interface HistoryEntry {
+  label: string;
+  done: boolean;
 }
 
-export function loadFromText(text: string): void {
-  const clean = String(text).replace(/^\uFEFF/, '');
-  const raw: unknown = JSON.parse(clean);
-  if (!raw || typeof raw !== 'object') throw new Error('文件格式不正确');
-  const obj = raw as { app?: unknown; version?: unknown; elements?: unknown };
-  if (obj.app !== 'whiteboard-canvas' || !Array.isArray(obj.elements)) throw new Error('文件格式不正确');
-  const version = Number(obj.version) || 1;
-  if (version > 2) throw new Error(`该文件由更高版本创建（v${version}），请升级应用后再打开。`);
+/** 历史面板数据：已做步骤 + 可重做步骤 */
+export function historyEntries(): HistoryEntry[] {
+  const done = undoStack.map((entry) => ({ label: entry.label, done: true }));
+  const undone = redoStack
+    .slice()
+    .reverse()
+    .map((entry) => ({ label: entry.label, done: false }));
+  return done.concat(undone);
+}
+
+/** 跳转到第 index 个已完成步骤之后的状态（0 = 初始） */
+export function jumpToHistory(index: number): boolean {
+  const target = Math.max(0, Math.min(undoStack.length + redoStack.length, index));
+  let changed = false;
+  while (undoStack.length > target) {
+    if (!undo()) break;
+    changed = true;
+  }
+  while (undoStack.length < target) {
+    if (!redo()) break;
+    changed = true;
+  }
+  return changed;
+}
+
+export function serialize(): string {
+  syncActivePage();
+  return JSON.stringify({
+    app: 'whiteboard-canvas',
+    version: 3,
+    pages: state.pages.map((page) => ({ id: page.id, name: page.name, elements: page.elements })),
+    activePage: state.activePage
+  });
+}
+
+function parseElements(raw: unknown[]): El[] {
   const elements: El[] = [];
   const ids = new Set<string>();
-  for (const item of (obj.elements as unknown[]).slice(0, MAX_ELEMENTS)) {
+  for (const item of raw.slice(0, MAX_ELEMENTS)) {
     const el = sanitizeEl(item);
     if (!el) continue;
     if (ids.has(el.id)) el.id = el.id + '-' + elements.length;
     ids.add(el.id);
     elements.push(el);
   }
-  state.doc = { app: 'whiteboard-canvas', version: 2, elements };
+  return elements;
+}
+
+export function loadFromText(text: string): void {
+  const clean = String(text).replace(/^\uFEFF/, '');
+  const raw: unknown = JSON.parse(clean);
+  if (!raw || typeof raw !== 'object') throw new Error('文件格式不正确');
+  const obj = raw as { app?: unknown; version?: unknown; elements?: unknown; pages?: unknown; activePage?: unknown };
+  if (obj.app !== 'whiteboard-canvas') throw new Error('文件格式不正确');
+  const version = Number(obj.version) || 1;
+  if (version > 3) throw new Error(`该文件由更高版本创建（v${version}），请升级应用后再打开。`);
+  let pages: Page[] = [];
+  if (Array.isArray(obj.pages)) {
+    for (const item of obj.pages.slice(0, 200)) {
+      if (!item || typeof item !== 'object') continue;
+      const p = item as { id?: unknown; name?: unknown; elements?: unknown };
+      pages.push({
+        id: typeof p.id === 'string' && p.id ? p.id : uidPage(),
+        name: typeof p.name === 'string' ? p.name.slice(0, 100) : `页面 ${pages.length + 1}`,
+        elements: Array.isArray(p.elements) ? parseElements(p.elements) : []
+      });
+    }
+  } else if (Array.isArray(obj.elements)) {
+    pages.push({ id: uidPage(), name: '页面 1', elements: parseElements(obj.elements) });
+  }
+  if (!pages.length) throw new Error('文件格式不正确');
+  const active = Math.min(pages.length - 1, Math.max(0, Number(obj.activePage) || 0));
+  state.pages = pages;
+  state.activePage = active;
+  state.doc = { app: 'whiteboard-canvas', version: 3, elements: pages[active].elements };
 }
 
 export function resetDoc(): void {
-  state.doc = { app: 'whiteboard-canvas', version: 2, elements: [] };
+  state.pages = [{ id: uidPage(), name: '页面 1', elements: [] }];
+  state.activePage = 0;
+  state.doc = { app: 'whiteboard-canvas', version: 3, elements: state.pages[0].elements };
   state.filePath = null;
   state.selectedIds = [];
   state.revision = 0;
   clearHistory();
+}
+
+export function addPage(name?: string): Page {
+  syncActivePage();
+  const page: Page = { id: uidPage(), name: name || `页面 ${state.pages.length + 1}`, elements: [] };
+  state.pages.push(page);
+  return page;
+}
+
+export function removePage(index: number): boolean {
+  if (state.pages.length <= 1) return false;
+  if (index < 0 || index >= state.pages.length) return false;
+  syncActivePage();
+  state.pages.splice(index, 1);
+  if (state.activePage >= state.pages.length) state.activePage = state.pages.length - 1;
+  else if (index < state.activePage) state.activePage -= 1;
+  state.doc = { app: 'whiteboard-canvas', version: 3, elements: state.pages[state.activePage].elements };
+  state.selectedIds = [];
+  clearHistory();
+  return true;
+}
+
+export function switchPage(index: number): boolean {
+  if (index < 0 || index >= state.pages.length || index === state.activePage) return false;
+  syncActivePage();
+  state.activePage = index;
+  state.doc = { app: 'whiteboard-canvas', version: 3, elements: state.pages[index].elements };
+  state.selectedIds = [];
+  clearHistory();
+  return true;
+}
+
+export function movePage(from: number, to: number): boolean {
+  if (from === to || from < 0 || from >= state.pages.length || to < 0 || to >= state.pages.length) return false;
+  syncActivePage();
+  const [page] = state.pages.splice(from, 1);
+  state.pages.splice(to, 0, page);
+  if (state.activePage === from) state.activePage = to;
+  else if (from < state.activePage && to >= state.activePage) state.activePage -= 1;
+  else if (from > state.activePage && to <= state.activePage) state.activePage += 1;
+  return true;
+}
+
+export function renamePage(index: number, name: string): void {
+  const page = state.pages[index];
+  if (!page) return;
+  const clean = name.trim().slice(0, 100);
+  if (clean) page.name = clean;
 }
 
 export function pruneSelection(): void {

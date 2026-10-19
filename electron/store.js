@@ -12,8 +12,24 @@ const DEFAULT_SETTINGS = {
   autosaveDelay: 1,
   closeBehavior: 'ask',
   disableGpu: false,
-  background: 'dots'
+  background: 'dots',
+  theme: 'light',
+  language: 'zh',
+  exportBackground: true,
+  template: 'blank',
+  shortcuts: {}
 };
+
+function cleanShortcuts(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [key, value] of Object.entries(raw).slice(0, 100)) {
+    if (!/^[a-zA-Z0-9_-]{1,32}$/.test(key)) continue;
+    if (typeof value !== 'string' || value.length > 40) continue;
+    out[key] = value;
+  }
+  return out;
+}
 
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
@@ -28,6 +44,11 @@ function validateSettings(raw) {
   out.closeBehavior = ['ask', 'save', 'discard'].includes(raw.closeBehavior) ? raw.closeBehavior : DEFAULT_SETTINGS.closeBehavior;
   out.disableGpu = raw.disableGpu === true;
   out.background = ['dots', 'grid', 'plain', 'cream'].includes(raw.background) ? raw.background : DEFAULT_SETTINGS.background;
+  out.theme = raw.theme === 'dark' ? 'dark' : 'light';
+  out.language = raw.language === 'en' ? 'en' : 'zh';
+  out.exportBackground = raw.exportBackground !== false;
+  out.template = typeof raw.template === 'string' ? raw.template.slice(0, 32) : 'blank';
+  out.shortcuts = cleanShortcuts(raw.shortcuts);
   return out;
 }
 
@@ -48,6 +69,7 @@ function createStore(userData) {
   const logFile = path.join(logsDir, 'main.log');
   const settingsFile = path.join(userData, 'settings.json');
   const recentFile = path.join(userData, 'recent.json');
+  const sessionFile = path.join(userData, 'session.json');
   const recoveryFile = path.join(userData, 'recovery.wbc');
   const recoveryMetaFile = path.join(userData, 'recovery.json');
   for (const dir of [logsDir, backupsDir]) fs.mkdirSync(dir, { recursive: true });
@@ -116,6 +138,22 @@ function createStore(userData) {
       writeJson(recentFile, list.slice(0, RECENT_LIMIT));
     } catch (err) {
       log('warn', '写入最近文件失败：' + err.message);
+    }
+  }
+
+  function session() {
+    const list = readJson(sessionFile, []);
+    return Array.isArray(list) ? list.filter((item) => typeof item === 'string').slice(0, 20) : [];
+  }
+
+  function addSession(filePath) {
+    if (typeof filePath !== 'string' || !filePath) return;
+    const list = session().filter((item) => item.toLowerCase() !== filePath.toLowerCase());
+    list.unshift(filePath);
+    try {
+      writeJson(sessionFile, list.slice(0, 20));
+    } catch {
+      /* 忽略 */
     }
   }
 
@@ -261,6 +299,8 @@ function createStore(userData) {
     saveSettings,
     recent,
     addRecent,
+    session,
+    addSession,
     clearRecent,
     backupBuffer,
     backupFile,

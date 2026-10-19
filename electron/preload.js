@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('api', {
   saveDoc: (path, text, silent) => ipcRenderer.invoke('doc:save', { path, text, silent }),
   savePng: (dataUrl, path) => ipcRenderer.invoke('png:save', dataUrl, path),
   printPng: (dataUrl, mode, target) => ipcRenderer.invoke('print:png', dataUrl, mode, target),
+  printPages: (dataUrls, mode, target) => ipcRenderer.invoke('print:pages', dataUrls, mode, target),
+  saveSvg: (svg, path) => ipcRenderer.invoke('svg:save', svg, path),
   showError: (message) => ipcRenderer.send('app:error', message),
   log: (level, message) => ipcRenderer.send('app:log', level, message),
   confirm: (message, detail) => ipcRenderer.invoke('app:confirm', message, detail),

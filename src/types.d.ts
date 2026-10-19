@@ -6,6 +6,7 @@ export interface OpenResult {
   text?: string;
   canceled?: boolean;
   error?: string;
+  repaired?: boolean;
 }
 
 export interface SaveResult {
@@ -14,11 +15,19 @@ export interface SaveResult {
   error?: string;
 }
 
+export type Theme = 'light' | 'dark';
+export type Language = 'zh' | 'en';
+
 export interface Settings {
   autosaveDelay: number;
   closeBehavior: 'ask' | 'save' | 'discard';
   disableGpu: boolean;
   background: 'dots' | 'grid' | 'plain' | 'cream';
+  theme: Theme;
+  language: Language;
+  exportBackground: boolean;
+  template: string;
+  shortcuts: Record<string, string>;
 }
 
 export interface RecoveryData {
@@ -62,6 +71,8 @@ export interface Api {
   saveDoc(path: string | null, text: string, silent?: boolean): Promise<SaveResult>;
   savePng(dataUrl: string, path?: string): Promise<SaveResult>;
   printPng(dataUrl: string, mode: 'pdf' | 'print', target?: string): Promise<SaveResult>;
+  printPages(dataUrls: string[], mode: 'pdf' | 'print', target?: string): Promise<SaveResult>;
+  saveSvg(svg: string, path?: string): Promise<SaveResult>;
   showError(message: string): void;
   log(level: 'info' | 'warn' | 'error', message: string): void;
   confirm(message: string, detail?: string): Promise<boolean>;
@@ -124,6 +135,33 @@ export interface TestApi {
   setView(zoom: number, panX: number, panY: number): void;
   mountedCount(): number;
   printPdfTo(path: string): Promise<boolean>;
+  addPoly(kind: 'triangle' | 'diamond' | 'star' | 'roundrect', x: number, y: number, w: number, h: number): string;
+  setRotation(id: string, deg: number): void;
+  groupSelection(): void;
+  ungroupSelection(): void;
+  setLocked(id: string, locked: boolean): void;
+  setHidden(id: string, hidden: boolean): void;
+  setTextStyle(id: string, patch: Record<string, unknown>): void;
+  addSticky(text: string, x: number, y: number): string;
+  connect(fromId: string, toId: string): string;
+  lasso(points: [number, number][], shift?: boolean): string[];
+  setLabel(id: string, label: string): void;
+  copyFormat(): boolean;
+  pasteFormat(id: string): boolean;
+  history(): { label: string; done: boolean }[];
+  jumpHistory(index: number): void;
+  search(text: string): string[];
+  exportSvgTo(path: string): Promise<boolean>;
+  pageNames(): string[];
+  addPage(name: string): string;
+  removePage(index: number): boolean;
+  switchPage(index: number): boolean;
+  crop(id: string, crop: { x: number; y: number; w: number; h: number }, flipH: boolean, flipV: boolean): Promise<boolean>;
+  compress(id: string, mime: string, quality: number): Promise<boolean>;
+  printAllPagesTo(path: string): Promise<boolean>;
+  elementLabel(id: string): string;
+  focusElement(id: string): boolean;
+  applySettings(patch: Partial<Settings>): Promise<boolean>;
 }
 
 declare global {

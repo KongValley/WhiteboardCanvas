@@ -9,13 +9,19 @@
 <body>
 <div id="topbar">
   <div id="title">未命名.wbc</div>
-  <div id="status"><span id="status-msg"></span><span id="status-info"></span></div>
+  <div id="pagebar">
+    <select id="page-select" aria-label="页面"></select>
+    <button id="page-add" title="新建页面">＋</button>
+    <button id="page-more" title="页面操作">…</button>
+  </div>
+  <div id="status"><span id="status-msg" aria-live="polite"></span><span id="status-info"></span></div>
   <div id="zoombar">
     <button id="zoom-out" title="缩小">−</button>
     <input id="zoom-input" type="number" min="10" max="400" step="1" value="100" aria-label="缩放百分比">
     <span class="zoom-unit">%</span>
     <button id="zoom-in" title="放大">+</button>
     <button id="zoom-fit">适应</button>
+    <button id="panel-btn" title="图层面板">图层</button>
     <button id="help-btn" title="快捷键 (F1)">?</button>
   </div>
 </div>
@@ -25,17 +31,28 @@
   <div id="selection" hidden></div>
   <div id="eraser-ring" hidden></div>
   <div id="hint">双击画布输入文字，或选择左侧工具开始</div>
+  <div id="searchbar" hidden>
+    <input id="search-input" type="search" placeholder="搜索文字 / 标签" aria-label="搜索画布">
+    <span id="search-count">0/0</span>
+    <button id="search-close" title="关闭">×</button>
+  </div>
 </div>
 <div id="toolbar">
   <button data-tool="select" title="选择 (V)">选择</button>
+  <button data-tool="lasso" title="套索 (Q)">套索</button>
   <button data-tool="pen" title="画笔 (P)">画笔</button>
   <button data-tool="highlighter" title="荧光笔 (H)">荧光笔</button>
   <button data-tool="eraser" title="橡皮 (E)">橡皮</button>
   <button data-tool="text" title="文字 (T)">文字</button>
+  <button data-tool="sticky" title="便签 (S)">便签</button>
   <button data-tool="rect" title="矩形 (R)">矩形</button>
   <button data-tool="ellipse" title="椭圆 (O)">椭圆</button>
   <button data-tool="arrow" title="箭头 (A)">箭头</button>
   <button data-tool="line" title="直线 (L)">直线</button>
+  <button data-tool="poly" data-shape="triangle" title="三角形 (1)">三角</button>
+  <button data-tool="poly" data-shape="diamond" title="菱形 (2)">菱形</button>
+  <button data-tool="poly" data-shape="star" title="五角星 (3)">星形</button>
+  <button data-tool="poly" data-shape="roundrect" title="圆角矩形 (4)">圆角</button>
   <button id="pick-image" title="插入图片 (I)">图片</button>
 </div>
 <div id="palette" hidden>
@@ -43,6 +60,8 @@
   <div class="row" data-row="fill" hidden></div>
   <div class="row" data-row="width"></div>
   <div class="row" data-row="size"></div>
+  <div class="row" data-row="style"></div>
+  <div class="row" data-row="font"></div>
 </div>
 <div id="minimap">
   <button id="minimap-toggle" title="折叠/展开小地图" aria-expanded="true">−</button>
@@ -106,6 +125,22 @@
         <option value="cream">米色</option>
       </select>
     </label>
+    <label class="setting-row">主题
+      <select id="set-theme">
+        <option value="light">浅色</option>
+        <option value="dark">深色</option>
+      </select>
+    </label>
+    <label class="setting-row">界面语言
+      <select id="set-language">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
+    </label>
+    <label class="setting-row setting-check">
+      <input id="set-export-bg" type="checkbox"> PNG/PDF 导出包含背景
+    </label>
+    <div id="shortcut-list" class="shortcut-list"></div>
     <div class="setting-row setting-assoc">
       <span>.wbc 文件关联：<span id="assoc-state">未注册</span></span>
       <button id="assoc-toggle">注册 .wbc 关联</button>

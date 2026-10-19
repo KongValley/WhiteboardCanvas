@@ -126,3 +126,34 @@ function isZip(buf) {
 }
 
 module.exports = { write, read, isZip, crc32 };
+
+/** 扫描本地文件头，尽量读取截断的 ZIP */
+function readLenient(buf) {
+  const files = new Map();
+  const MAX_ENTRY = 300 * 1024 * 1024;
+  let ptr = 0;
+  while (ptr + 30 <= buf.length) {
+    if (buf.readUInt32LE(ptr) !== 0x04034b50) {
+      ptr += 1;
+      continue;
+    }
+    const method = buf.readUInt16LE(ptr + 8);
+    const compSize = buf.readUInt32LE(ptr + 18);
+    const nameLen = buf.readUInt16LE(ptr + 26);
+    const extraLen = buf.readUInt16LE(ptr + 28);
+    const dataStart = ptr + 30 + nameLen + extraLen;
+    if (nameLen <= 0 || compSize > MAX_ENTRY || dataStart + compSize > buf.length) break;
+    const name = buf.toString('utf8', ptr + 30, ptr + 30 + nameLen);
+    const raw = buf.subarray(dataStart, dataStart + compSize);
+    try {
+      if (method === 0) files.set(name, raw);
+      else if (method === 8) files.set(name, zlib.inflateRawSync(raw));
+    } catch {
+      /* 跳过损坏条目 */
+    }
+    ptr = dataStart + compSize;
+  }
+  return files;
+}
+
+module.exports = { write, read, isZip, crc32, readLenient };
