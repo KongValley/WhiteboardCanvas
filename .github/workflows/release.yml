@@ -1,0 +1,86 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. v1.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify manifest/lock/tag versions
+        shell: pwsh
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          node -e "const p=require('./package.json');const l=require('./package-lock.json');const tag=process.env.TAG.replace(/^v/,'');if(p.version!==tag||l.version!==tag||l.packages[''].version!==tag){console.error('version mismatch: tag='+tag+' package='+p.version+' lock='+l.version);process.exit(1)}"
+
+      - name: Typecheck and unit tests
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package ia32 ZIP
+        run: npx electron-builder --win zip --ia32 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Ensure release exists
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG --title $env:TAG --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'failed to create release' }
+          }
+
+      - name: Upload ZIP
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $zip = Get-ChildItem release/*.zip | Select-Object -First 1
+          if (-not $zip) { throw 'ZIP not found' }
+          gh release upload $env:TAG $zip.FullName --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'failed to upload ZIP' }
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release edit $env:TAG --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'failed to publish release' }

@@ -11,7 +11,7 @@
     "build": "vite build",
     "start": "npm run build && electron .",
     "smoke": "npm run build && electron . --smoke",
-    "dist": "npm run build && electron-builder --win zip --ia32",
+    "dist": "npm run build && electron-builder --win zip --ia32 --publish never",
     "test": "tsc -p tsconfig.test.json && node --test test/model.test.cjs test/state.test.cjs test/zip.test.cjs",
     "e2e": "node scripts/e2e.js",
     "bench": "node scripts/bench.js"
