@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import './style.css';
 import {
+  AlignMode,
   ArrowEl,
+  Dash,
   El,
   EllipseEl,
   ImageEl,
@@ -13,11 +15,14 @@ import {
   RectEl,
   TextEl,
   Tool,
+  alignDeltas,
   arrowPathD,
   bounds,
   boundsUnion,
   centerOf,
+  dashArray,
   distToSegment,
+  distributeDeltas,
   hitTest,
   inkAbsolutePoints,
   moveEl,
@@ -44,11 +49,13 @@ import {
   markSaved,
   movePage,
   pruneSelection,
+  pushPageUndo,
   removeElement,
   removePage,
   renamePage,
   resetDoc,
   redo as redoHistory,
+  redoPage,
   serialize,
   setRecoverySnapshotProvider,
   setStatus,
@@ -56,7 +63,8 @@ import {
   state,
   updateTitle,
   switchPage,
-  undo as undoHistory
+  undo as undoHistory,
+  undoPage
 } from './state';
 import { FONT, describeEl, refreshConnectors, renderAll, setEditing, setRenderHook, syncNodes, updateElNode, updateSelectionBox } from './render';
 import {
@@ -99,11 +107,11 @@ import {
   saveDocument,
   setEditHooks
 } from './io';
-import { installContextMenu, showContextMenu } from './contextmenu';
+import { installContextMenu, hideContextMenu, showContextMenu } from './contextmenu';
 import { openForm, openPrompt } from './dialogs';
 import type { MenuItem } from './contextmenu';
 import { installMinimap, requestMinimap } from './minimap';
-import { applyTheme, currentShortcuts, installSettings, openSettings } from './settings';
+import { applyTheme, closeSettings, currentShortcuts, installSettings, openSettings } from './settings';
 import { installPanels, refreshPanels, togglePanels } from './panels';
 import { toolIcon } from './icons';
 import { applyI18n, t } from './i18n';
@@ -160,6 +168,8 @@ const searchClose = document.getElementById('search-close') as HTMLButtonElement
 
 let colorRow: HTMLDivElement;
 let widthRow: HTMLDivElement;
+let dashRow: HTMLDivElement;
+let opacityRow: HTMLDivElement;
 let sizeRow: HTMLDivElement;
 let fillRow: HTMLDivElement;
 let styleRow: HTMLDivElement;
@@ -173,6 +183,8 @@ interface StyleSnapshot {
   stroke: string;
   fill: string;
   width: number;
+  dash: Dash;
+  opacity: number;
   fontSize: number;
   fontFamily?: string;
   lineHeight?: number;
@@ -196,6 +208,9 @@ let searchIndex = 0;
 let lastPenAt = 0;
 let inertiaFrame = 0;
 let panSample = { x: 0, y: 0, t: 0, vx: 0, vy: 0 };
+let presenting = false;
+let presentView: { zoom: number; pan: { x: number; y: number } } | null = null;
+let presentWasFullScreen = false;
 
 type ElNode = HTMLElement | SVGSVGElement;
 
@@ -217,6 +232,14 @@ let drag: DragState = { kind: 'none' };
 function selectedElements(): El[] {
   const ids = new Set(state.selectedIds);
   return state.doc.elements.filter((el) => ids.has(el.id));
+}
+
+function currentDash(): Dash | undefined {
+  return state.dash === 'solid' ? undefined : state.dash;
+}
+
+function currentOpacity(): number | undefined {
+  return state.opacity < 1 ? state.opacity : undefined;
 }
 
 /** 点击组内元素时整组选中 */
@@ -258,17 +281,22 @@ function syncPaletteFromSelection(): void {
   if (el.type === 'text') {
     state.color = el.color;
     state.fontSize = el.fontSize;
+    state.dash = 'solid';
   } else if (el.type === 'ink') {
     state.color = el.color;
     if (!el.highlight) state.width = el.width;
+    state.dash = 'solid';
   } else if (el.type === 'rect' || el.type === 'ellipse' || el.type === 'poly') {
     state.color = el.stroke;
     state.width = el.strokeWidth;
     state.fill = el.fill;
+    state.dash = el.dash || 'solid';
   } else if (el.type === 'arrow') {
     state.color = el.stroke;
     state.width = el.strokeWidth;
+    state.dash = el.dash || 'solid';
   }
+  state.opacity = el.opacity ?? 1;
 }
 
 function editingTextEl(): TextEl | null {
@@ -281,15 +309,18 @@ function editingTextEl(): TextEl | null {
 function recoverySnapshot(): string {
   const el = editingTextEl();
   if (!el) return serialize();
-  const doc = structuredClone(state.doc);
-  const target = doc.elements.find((item) => item.id === el.id);
-  if (target && target.type === 'text') {
-    target.text = editor.value;
-    const width = parseFloat(editor.style.width);
-    if (Number.isFinite(width)) target.w = Math.max(60, width);
-    target.h = Math.max(target.fontSize * 1.4, editor.scrollHeight);
+  const prev = { text: el.text, w: el.w, h: el.h };
+  el.text = editor.value;
+  const width = parseFloat(editor.style.width);
+  if (Number.isFinite(width)) el.w = Math.max(60, width);
+  el.h = Math.max(el.fontSize * 1.4, editor.scrollHeight);
+  try {
+    return serialize();
+  } finally {
+    el.text = prev.text;
+    el.w = prev.w;
+    el.h = prev.h;
   }
-  return JSON.stringify(doc);
 }
 
 function ensureEditorVisible(): void {
@@ -408,7 +439,8 @@ function createTextAt(at: Pt, sticky = false): void {
     fontSize: state.fontSize,
     color: state.color,
     sticky: sticky || undefined,
-    stickyColor: sticky ? '#fef3c7' : undefined
+    stickyColor: sticky ? '#fef3c7' : undefined,
+    opacity: currentOpacity()
   };
   state.doc.elements.push(el);
   state.selectedIds = [el.id];
@@ -430,7 +462,8 @@ function commitPen(d: Extract<DragState, { kind: 'pen' }>): void {
     points: norm.points,
     color: state.color,
     width: penWidth(d.highlight, d.pressures),
-    highlight: d.highlight || undefined
+    highlight: d.highlight || undefined,
+    opacity: currentOpacity()
   };
   state.doc.elements.push(el);
   state.selectedIds = [el.id];
@@ -456,7 +489,9 @@ function commitShape(d: Extract<DragState, { kind: 'shape' }>, end: Pt): void {
       h,
       stroke: state.color,
       strokeWidth: state.width,
-      fill: state.fill
+      fill: state.fill,
+      dash: currentDash(),
+      opacity: currentOpacity()
     };
     state.doc.elements.push(el);
     state.selectedIds = [el.id];
@@ -477,7 +512,9 @@ function commitShape(d: Extract<DragState, { kind: 'shape' }>, end: Pt): void {
       y2: end[1],
       stroke: state.color,
       strokeWidth: state.width,
-      head: d.type === 'arrow'
+      head: d.type === 'arrow',
+      dash: currentDash(),
+      opacity: currentOpacity()
     };
     const startTarget = connectTarget(d.start);
     const endTarget = connectTarget(end);
@@ -501,8 +538,8 @@ function commitShape(d: Extract<DragState, { kind: 'shape' }>, end: Pt): void {
     const y = Math.min(d.start[1], end[1]);
     const el: RectEl | EllipseEl =
       d.type === 'rect'
-        ? { id: uid(), type: 'rect', x, y, w, h, stroke: state.color, strokeWidth: state.width, fill: state.fill }
-        : { id: uid(), type: 'ellipse', x, y, w, h, stroke: state.color, strokeWidth: state.width, fill: state.fill };
+        ? { id: uid(), type: 'rect', x, y, w, h, stroke: state.color, strokeWidth: state.width, fill: state.fill, dash: currentDash(), opacity: currentOpacity() }
+        : { id: uid(), type: 'ellipse', x, y, w, h, stroke: state.color, strokeWidth: state.width, fill: state.fill, dash: currentDash(), opacity: currentOpacity() };
     state.doc.elements.push(el);
     state.selectedIds = [el.id];
   }
@@ -587,18 +624,31 @@ function startShape(type: 'rect' | 'ellipse' | 'arrow' | 'line' | 'poly', at: Pt
     const svg = createPreviewSvg(state.color, state.width);
     const path = document.createElementNS(SVG_NS, 'path');
     path.setAttribute('fill', state.fill || 'none');
+    path.setAttribute('stroke', state.color);
+    path.setAttribute('stroke-width', String(state.width));
+    path.setAttribute('stroke-linecap', 'round');
+    const dash = dashArray(state.dash, state.width);
+    if (dash) path.setAttribute('stroke-dasharray', dash.join(' '));
     svg.appendChild(path);
     preview = svg;
   } else if (type === 'arrow' || type === 'line') {
     const svg = createPreviewSvg(state.color, state.width);
-    svg.appendChild(document.createElementNS(SVG_NS, 'path'));
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('stroke', state.color);
+    path.setAttribute('stroke-width', String(state.width));
+    path.setAttribute('stroke-linecap', 'round');
+    const dash = dashArray(state.dash, state.width);
+    if (dash) path.setAttribute('stroke-dasharray', dash.join(' '));
+    svg.appendChild(path);
     preview = svg;
   } else {
     const div = document.createElement('div');
     div.style.position = 'absolute';
     div.style.boxSizing = 'border-box';
     div.style.border = state.width + 'px solid ' + state.color;
+    div.style.borderStyle = state.dash === 'dash' ? 'dashed' : state.dash === 'dot' ? 'dotted' : 'solid';
     div.style.background = state.fill || 'transparent';
+    div.style.opacity = String(state.opacity);
     div.style.pointerEvents = 'none';
     if (type === 'ellipse') div.style.borderRadius = '50%';
     preview = div;
@@ -818,6 +868,11 @@ function scaleSelection(d: Extract<DragState, { kind: 'resize' }>, p: Pt): boole
       el.y = next.y + (o.y - d.orig.y) * sy;
       el.w = Math.max(8, o.w * sx);
       el.h = Math.max(8, o.h * sy);
+    } else if (o.type === 'poly' && el.type === 'poly') {
+      el.x = next.x + (o.x - d.orig.x) * sx;
+      el.y = next.y + (o.y - d.orig.y) * sy;
+      el.w = Math.max(8, o.w * sx);
+      el.h = Math.max(8, o.h * sy);
     }
     changed = true;
     updateElNode(el);
@@ -974,26 +1029,44 @@ function copySelected(cut: boolean): void {
   setStatus((cut ? '已剪切 ' : '已复制 ') + sources.length + ' 项');
 }
 
-function undoAction(): void {
+function undoAction(): boolean {
   commitEdit();
-  if (!undoHistory()) return;
-  pruneSelection();
-  syncPaletteFromSelection();
-  refreshPalette();
-  renderAll();
-  updateStatusInfo();
-  setStatus('');
+  if (undoHistory()) {
+    pruneSelection();
+    syncPaletteFromSelection();
+    refreshPalette();
+    renderAll();
+    updateStatusInfo();
+    setStatus('');
+    return true;
+  }
+  if (undoPage()) {
+    afterPageChange();
+    refreshPalette();
+    setStatus('已恢复页面');
+    return true;
+  }
+  return false;
 }
 
-function redoAction(): void {
+function redoAction(): boolean {
   commitEdit();
-  if (!redoHistory()) return;
-  pruneSelection();
-  syncPaletteFromSelection();
-  refreshPalette();
-  renderAll();
-  updateStatusInfo();
-  setStatus('');
+  if (redoHistory()) {
+    pruneSelection();
+    syncPaletteFromSelection();
+    refreshPalette();
+    renderAll();
+    updateStatusInfo();
+    setStatus('');
+    return true;
+  }
+  if (redoPage()) {
+    afterPageChange();
+    refreshPalette();
+    setStatus('已重新删除页面');
+    return true;
+  }
+  return false;
 }
 
 function zoomAroundViewport(factor: number): void {
@@ -1046,9 +1119,15 @@ function refreshPalette(): void {
     tool === 'rect' || tool === 'ellipse' || tool === 'poly' ||
     (tool === 'select' && types.some((t) => t === 'rect' || t === 'ellipse' || t === 'poly'));
   const showStyle = tool === 'text' || tool === 'sticky' || (tool === 'select' && types.includes('text'));
-  palette.hidden = !showColors && !showFill && !showStyle;
+  const showDash =
+    tool === 'rect' || tool === 'ellipse' || tool === 'arrow' || tool === 'line' || tool === 'poly' ||
+    (tool === 'select' && types.some((t) => t === 'rect' || t === 'ellipse' || t === 'arrow' || t === 'poly'));
+  const showOpacity = isStrokeTool || tool === 'text' || tool === 'sticky' || (tool === 'select' && types.length > 0);
+  palette.hidden = !showColors && !showFill && !showStyle && !showOpacity;
   colorRow.hidden = !showColors;
   widthRow.hidden = !showWidths;
+  dashRow.hidden = !showDash;
+  opacityRow.hidden = !showOpacity;
   sizeRow.hidden = !showSizes;
   fillRow.hidden = !showFill;
   styleRow.hidden = !showStyle;
@@ -1059,10 +1138,15 @@ function refreshPalette(): void {
     const active =
       (row === 'color' && value === state.color) ||
       (row === 'width' && Number(value) === state.width) ||
+      (row === 'dash' && value === state.dash) ||
       (row === 'size' && Number(value) === state.fontSize) ||
       (row === 'fill' && value === state.fill);
     btn.classList.toggle('active', active);
   }
+  const opacityInput = document.getElementById('opacity-range') as HTMLInputElement | null;
+  const opacityValue = document.getElementById('opacity-value') as HTMLSpanElement | null;
+  if (opacityInput) opacityInput.value = String(Math.round(state.opacity * 100));
+  if (opacityValue) opacityValue.textContent = Math.round(state.opacity * 100) + '%';
   const text = firstText();
   for (const btn of Array.from(styleRow.querySelectorAll<HTMLButtonElement>('button[data-style]'))) {
     const key = btn.dataset.style as 'bold' | 'italic' | 'underline' | 'strike' | 'bullets';
@@ -1130,6 +1214,52 @@ function applyWidth(width: number): void {
   }
   if (changed) {
     commitMutation(before, true);
+    renderAll();
+    updateStatusInfo();
+  }
+  refreshPalette();
+}
+
+function applyDash(dash: Dash): void {
+  state.dash = dash;
+  const targets = selectedElements().filter(
+    (el): el is RectEl | EllipseEl | PolyEl | ArrowEl =>
+      el.type === 'rect' || el.type === 'ellipse' || el.type === 'poly' || el.type === 'arrow'
+  );
+  const before = beginMutation();
+  let changed = false;
+  for (const el of targets) {
+    if (el.locked) continue;
+    const next = dash === 'solid' ? undefined : dash;
+    if ((el.dash || 'solid') !== dash) {
+      el.dash = next;
+      changed = true;
+    }
+  }
+  if (changed) {
+    commitMutation(before, true, '线型');
+    renderAll();
+    updateStatusInfo();
+  }
+  refreshPalette();
+}
+
+function applyOpacity(percent: number): void {
+  const value = Math.min(100, Math.max(10, Math.round(percent))) / 100;
+  state.opacity = value;
+  const targets = selectedElements();
+  const before = beginMutation();
+  let changed = false;
+  for (const el of targets) {
+    if (el.locked) continue;
+    const next = value < 1 ? value : undefined;
+    if ((el.opacity ?? 1) !== (next ?? 1)) {
+      el.opacity = next;
+      changed = true;
+    }
+  }
+  if (changed) {
+    commitMutation(before, true, '透明度');
     renderAll();
     updateStatusInfo();
   }
@@ -1250,6 +1380,39 @@ function buildPalette(): void {
     btn.addEventListener('click', () => applyWidth(width));
     widthRow.appendChild(btn);
   }
+  dashRow = palette.querySelector('[data-row="dash"]') as HTMLDivElement;
+  const dashOptions: { value: Dash; label: string; title: string }[] = [
+    { value: 'solid', label: '—', title: '实线' },
+    { value: 'dash', label: '┄', title: '虚线' },
+    { value: 'dot', label: '·', title: '点线' }
+  ];
+  for (const item of dashOptions) {
+    const btn = document.createElement('button');
+    btn.className = 'opt dash-btn';
+    btn.dataset.value = item.value;
+    btn.textContent = item.label;
+    btn.title = item.title;
+    btn.addEventListener('click', () => applyDash(item.value));
+    dashRow.appendChild(btn);
+  }
+  opacityRow = palette.querySelector('[data-row="opacity"]') as HTMLDivElement;
+  const opacityLabel = document.createElement('span');
+  opacityLabel.textContent = '透明度';
+  const opacityInput = document.createElement('input');
+  opacityInput.id = 'opacity-range';
+  opacityInput.type = 'range';
+  opacityInput.min = '10';
+  opacityInput.max = '100';
+  opacityInput.step = '5';
+  opacityInput.value = String(Math.round(state.opacity * 100));
+  const opacityValue = document.createElement('span');
+  opacityValue.id = 'opacity-value';
+  opacityValue.textContent = Math.round(state.opacity * 100) + '%';
+  opacityInput.addEventListener('input', () => {
+    opacityValue.textContent = opacityInput.value + '%';
+  });
+  opacityInput.addEventListener('change', () => applyOpacity(Number(opacityInput.value)));
+  opacityRow.append(opacityLabel, opacityInput, opacityValue);
   for (const size of SIZES) {
     const btn = document.createElement('button');
     btn.className = 'opt';
@@ -1394,6 +1557,8 @@ function captureStyle(el: El): StyleSnapshot {
     stroke: state.color,
     fill: '',
     width: state.width,
+    dash: 'solid',
+    opacity: el.opacity ?? 1,
     fontSize: state.fontSize
   };
   if (el.type === 'text') {
@@ -1415,9 +1580,11 @@ function captureStyle(el: El): StyleSnapshot {
     snap.stroke = el.stroke;
     snap.fill = el.fill;
     snap.width = el.strokeWidth;
+    snap.dash = el.dash || 'solid';
   } else if (el.type === 'arrow') {
     snap.stroke = el.stroke;
     snap.width = el.strokeWidth;
+    snap.dash = el.dash || 'solid';
   }
   return snap;
 }
@@ -1438,6 +1605,7 @@ function applyFormatTo(el: El): void {
   if (!formatBrush || el.locked) return;
   const before = beginMutation();
   const style = formatBrush;
+  el.opacity = style.opacity < 1 ? style.opacity : undefined;
   if (el.type === 'text') {
     el.color = style.color;
     el.fontSize = style.fontSize;
@@ -1457,9 +1625,11 @@ function applyFormatTo(el: El): void {
     el.stroke = style.stroke;
     el.fill = style.fill;
     el.strokeWidth = style.width;
+    el.dash = style.dash === 'solid' ? undefined : style.dash;
   } else if (el.type === 'arrow') {
     el.stroke = style.stroke;
     el.strokeWidth = style.width;
+    el.dash = style.dash === 'solid' ? undefined : style.dash;
   }
   commitMutation(before, true, '应用格式');
   updateElNode(el);
@@ -1531,6 +1701,11 @@ async function editArrowLabel(id: string): Promise<void> {
 
 function onPointerDown(e: PointerEvent): void {
   if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+  if (presenting) {
+    e.preventDefault();
+    if (e.button === 0) presentPage(1);
+    return;
+  }
   const target = e.target as HTMLElement;
   if (e.button === 0 && target.classList.contains('handle')) return;
   commitEdit();
@@ -1815,6 +1990,7 @@ function finishDrag(e: PointerEvent): void {
 }
 
 function onDoubleClick(e: MouseEvent): void {
+  if (presenting) return;
   if (state.tool !== 'select') return;
   const p = screenToWorld(e.clientX, e.clientY);
   const hit = hitTest(state.doc.elements, p, 6 / view.zoom);
@@ -1838,6 +2014,7 @@ function installPointerEvents(): void {
   viewport.addEventListener('dblclick', onDoubleClick);
   viewport.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    if (presenting) return;
     if (panMoved) {
       panMoved = false;
       return;
@@ -1985,6 +2162,7 @@ function buildContextMenu(p: Pt, hit: El | null): MenuItem[] {
     return items;
   }
   const hasSelection = state.selectedIds.length > 0;
+  const editableCount = editableSelection().length;
   items.push(
     { label: t('ctx.copy'), action: () => copySelected(false), disabled: !hasSelection },
     { label: t('ctx.cut'), action: () => copySelected(true), disabled: !hasSelection },
@@ -2003,6 +2181,15 @@ function buildContextMenu(p: Pt, hit: El | null): MenuItem[] {
       disabled: !hasSelection
     },
     { label: t('ctx.hide'), action: () => setHiddenSelection(true), disabled: !hasSelection },
+    { separator: true, label: '', action: () => {} },
+    { label: t('ctx.alignLeft'), action: () => alignSelection('left'), disabled: editableCount < 2 },
+    { label: t('ctx.alignHCenter'), action: () => alignSelection('hcenter'), disabled: editableCount < 2 },
+    { label: t('ctx.alignRight'), action: () => alignSelection('right'), disabled: editableCount < 2 },
+    { label: t('ctx.alignTop'), action: () => alignSelection('top'), disabled: editableCount < 2 },
+    { label: t('ctx.alignVCenter'), action: () => alignSelection('vcenter'), disabled: editableCount < 2 },
+    { label: t('ctx.alignBottom'), action: () => alignSelection('bottom'), disabled: editableCount < 2 },
+    { label: t('ctx.distributeH'), action: () => distributeSelection('x'), disabled: editableCount < 3 },
+    { label: t('ctx.distributeV'), action: () => distributeSelection('y'), disabled: editableCount < 3 },
     { separator: true, label: '', action: () => {} },
     { label: t('ctx.copyFormat'), action: () => copyFormatFromSelection(), disabled: !hasSelection },
     { label: t('ctx.pasteFormat'), action: applyFormatToSelection, disabled: !formatBrush || !hasSelection },
@@ -2044,6 +2231,56 @@ function buildContextMenu(p: Pt, hit: El | null): MenuItem[] {
     );
   }
   return items;
+}
+
+function alignSelection(mode: AlignMode): void {
+  commitEdit();
+  const targets = editableSelection();
+  if (targets.length < 2) {
+    setStatus('请至少选择两个未锁定元素');
+    return;
+  }
+  const deltas = alignDeltas(targets.map(visualBounds), mode);
+  const before = beginMutation();
+  let changed = false;
+  targets.forEach((el, index) => {
+    const [dx, dy] = deltas[index];
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return;
+    moveEl(el, dx, dy);
+    updateElNode(el);
+    changed = true;
+  });
+  if (!changed) return;
+  refreshConnectors();
+  commitMutation(before, true, '对齐');
+  updateSelectionBox();
+  updateStatusInfo();
+  setStatus('已对齐');
+}
+
+function distributeSelection(axis: 'x' | 'y'): void {
+  commitEdit();
+  const targets = editableSelection();
+  if (targets.length < 3) {
+    setStatus('请至少选择三个未锁定元素');
+    return;
+  }
+  const deltas = distributeDeltas(targets.map(visualBounds), axis);
+  const before = beginMutation();
+  let changed = false;
+  targets.forEach((el, index) => {
+    const [dx, dy] = deltas[index];
+    if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) return;
+    moveEl(el, dx, dy);
+    updateElNode(el);
+    changed = true;
+  });
+  if (!changed) return;
+  refreshConnectors();
+  commitMutation(before, true, '分布');
+  updateSelectionBox();
+  updateStatusInfo();
+  setStatus(axis === 'x' ? '已水平等距分布' : '已垂直等距分布');
 }
 
 function groupSelection(): void {
@@ -2129,6 +2366,56 @@ function refreshPageBar(): void {
   pageSelect.value = String(state.activePage);
 }
 
+async function setPresenting(on: boolean): Promise<boolean> {
+  if (on === presenting) return presenting;
+  if (on) {
+    commitEdit();
+    helpOverlay.hidden = true;
+    closeSettings();
+    closeSearch();
+    hideContextMenu();
+    setSelection([]);
+    presentView = { zoom: view.zoom, pan: { x: view.pan.x, y: view.pan.y } };
+    presenting = true;
+    document.body.classList.add('presenting');
+    try {
+      presentWasFullScreen = await window.api.setFullScreen(true);
+    } catch {
+      presentWasFullScreen = false;
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+    fitToContent();
+    updateSelectionBox();
+    return true;
+  }
+  presenting = false;
+  document.body.classList.remove('presenting');
+  if (presentView) {
+    view.zoom = presentView.zoom;
+    view.pan.x = presentView.pan.x;
+    view.pan.y = presentView.pan.y;
+    presentView = null;
+  }
+  applyTransform();
+  updateSelectionBox();
+  try {
+    await window.api.setFullScreen(presentWasFullScreen);
+  } catch {
+    /* 无窗口 API 时只退出演示界面 */
+  }
+  return false;
+}
+
+function presentPage(delta: number): boolean {
+  if (!presenting) return false;
+  const next = state.activePage + delta;
+  if (next < 0 || next >= state.pages.length) return false;
+  if (!switchPage(next)) return false;
+  afterPageChange();
+  setStatus(`第 ${next + 1} / ${state.pages.length} 页`);
+  return true;
+}
+
 function afterPageChange(): void {
   renderAll();
   fitToContent();
@@ -2157,6 +2444,25 @@ async function renamePageAction(): Promise<void> {
   setStatus('已重命名页面');
 }
 
+async function deletePageAt(index: number): Promise<boolean> {
+  if (index < 0 || index >= state.pages.length || state.pages.length <= 1) return false;
+  const backedUp = await backupNow();
+  if (!backedUp) {
+    const proceed = await window.api.confirm('删除前备份失败', '未能写入删除前的备份。仍要删除该页面吗？');
+    if (!proceed) {
+      setStatus('已取消删除');
+      return false;
+    }
+  }
+  pushPageUndo('删除页面');
+  if (!removePage(index)) return false;
+  markDirty({ autosave: false });
+  afterPageChange();
+  refreshPalette();
+  setStatus(backedUp ? '已删除页面，可 Ctrl+Z 恢复' : '已删除页面（备份失败），可 Ctrl+Z 恢复');
+  return true;
+}
+
 async function deletePageAction(): Promise<void> {
   if (state.pages.length <= 1) {
     setStatus('至少保留一个页面');
@@ -2164,11 +2470,7 @@ async function deletePageAction(): Promise<void> {
   }
   const ok = await window.api.confirm('删除当前页面', '该页面内容将一并删除，是否继续？');
   if (!ok) return;
-  if (removePage(state.activePage)) {
-    markDirty({ autosave: false });
-    afterPageChange();
-    setStatus('已删除页面');
-  }
+  await deletePageAt(state.activePage);
 }
 
 function movePageAction(delta: number): void {
@@ -2375,6 +2677,24 @@ function installHelp(): void {
 
 function installKeyboard(): void {
   window.addEventListener('keydown', (e) => {
+    if (presenting) {
+      e.preventDefault();
+      if (e.key === 'F5' || e.key === 'Escape') {
+        void setPresenting(false);
+      } else if (e.key === 'PageDown' || e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        presentPage(1);
+      } else if (e.key === 'PageUp' || e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        presentPage(-1);
+      } else if (e.key === ' ') {
+        presentPage(e.shiftKey ? -1 : 1);
+      }
+      return;
+    }
+    if (e.key === 'F5') {
+      e.preventDefault();
+      void setPresenting(true);
+      return;
+    }
     if (e.key === 'F1') {
       e.preventDefault();
       toggleHelp(helpOverlay.hidden);
@@ -2583,6 +2903,7 @@ function installMenu(): void {
     else if (action === 'page-down') movePageAction(1);
     else if (action === 'toggle-panels') togglePanels();
     else if (action === 'search') openSearch();
+    else if (action === 'present') void setPresenting(!presenting);
     else if (action === 'backup-now') void backupNow();
     else if (action === 'restore-backup') void restoreBackup();
     else if (action === 'settings') openSettings();
@@ -2715,13 +3036,13 @@ function installTestHooks(): void {
       state.doc.elements.map((el) => {
         const b = bounds(el);
         const base = { id: el.id, type: el.type, x: b.x, y: b.y, w: b.w, h: b.h };
-        const meta = { rotation: el.rotation, groupId: el.groupId, locked: el.locked, hidden: el.hidden, name: el.name };
+        const meta = { rotation: el.rotation, groupId: el.groupId, locked: el.locked, hidden: el.hidden, name: el.name, opacity: el.opacity };
         if (el.type === 'text') return { ...base, ...meta, color: el.color, fontSize: el.fontSize, bold: el.bold, italic: el.italic, align: el.align, fontFamily: el.fontFamily, lineHeight: el.lineHeight, sticky: el.sticky };
         if (el.type === 'ink') return { ...base, ...meta, color: el.color, width: el.width, highlight: el.highlight };
         if (el.type === 'image') return { ...base, ...meta };
-        if (el.type === 'arrow') return { ...base, ...meta, stroke: el.stroke, strokeWidth: el.strokeWidth, head: el.head };
-        if (el.type === 'poly') return { ...base, ...meta, stroke: el.stroke, strokeWidth: el.strokeWidth, fill: el.fill, kind: el.kind };
-        return { ...base, ...meta, stroke: el.stroke, strokeWidth: el.strokeWidth, fill: el.fill };
+        if (el.type === 'arrow') return { ...base, ...meta, stroke: el.stroke, strokeWidth: el.strokeWidth, head: el.head, dash: el.dash };
+        if (el.type === 'poly') return { ...base, ...meta, stroke: el.stroke, strokeWidth: el.strokeWidth, fill: el.fill, kind: el.kind, dash: el.dash };
+        return { ...base, ...meta, stroke: el.stroke, strokeWidth: el.strokeWidth, fill: el.fill, dash: (el as RectEl | EllipseEl).dash };
       }),
     selectedIds: () => [...state.selectedIds],
     order: () => state.doc.elements.map((el) => el.id),
@@ -2731,6 +3052,8 @@ function installTestHooks(): void {
       return state.doc.elements.length;
     },
     nudge: (dx, dy) => nudgeSelected(dx, dy),
+    align: (mode) => alignSelection(mode),
+    distribute: (axis) => distributeSelection(axis),
     bringToFront: () => reorderSelection(true),
     sendToBack: () => reorderSelection(false),
     clipboardJson: () => buildElementClipboard(),
@@ -2821,22 +3144,8 @@ function installTestHooks(): void {
       updateSelectionBox();
       updateStatusInfo();
     },
-    undo: () => {
-      const ok = undoHistory();
-      if (ok) {
-        renderAll();
-        updateStatusInfo();
-      }
-      return ok;
-    },
-    redo: () => {
-      const ok = redoHistory();
-      if (ok) {
-        renderAll();
-        updateStatusInfo();
-      }
-      return ok;
-    },
+    undo: () => undoAction(),
+    redo: () => redoAction(),
     reset: () => {
       cancelEdit();
       resetDoc();
@@ -3031,6 +3340,7 @@ function installTestHooks(): void {
       return !!result.path;
     },
     pageNames: () => state.pages.map((page) => page.name),
+    activePage: () => state.activePage,
     addPage: (name) => {
       const page = addPage(name);
       markDirty({ autosave: false });
@@ -3045,6 +3355,7 @@ function installTestHooks(): void {
       }
       return ok;
     },
+    deletePage: (index) => deletePageAt(index),
     switchPage: (index) => {
       const ok = switchPage(index);
       if (ok) afterPageChange();
@@ -3096,6 +3407,9 @@ function installTestHooks(): void {
       view.pan.y = panY;
       applyTransform();
     },
+    present: (on) => setPresenting(on),
+    isPresenting: () => presenting,
+    presentPage: (delta) => presentPage(delta),
     mountedCount: () => world.querySelectorAll(':scope > *:not(#editor)').length
   };
   window.__test = testApi;

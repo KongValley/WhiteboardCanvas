@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { El, Tool, sanitizeEl } from './model';
+import { Dash, El, Tool, sanitizeEl } from './model';
 import type { Settings } from './types';
 
 export interface Page {
@@ -19,7 +19,14 @@ interface HistEntry {
   label: string;
 }
 
+interface PageSnapshot {
+  pages: Page[];
+  activePage: number;
+  label: string;
+}
+
 export const HISTORY_LIMIT = 100;
+const PAGE_HISTORY_LIMIT = 50;
 export const RECOVERY_DELAY = 3000;
 const MAX_ELEMENTS = 100000;
 
@@ -50,6 +57,8 @@ export const state = {
   tool: 'select' as Tool,
   color: '#1f2937',
   width: 3,
+  dash: 'solid' as Dash,
+  opacity: 1,
   fontSize: 24,
   fill: '',
   spaceDown: false,
@@ -63,6 +72,8 @@ const statusInfoEl = document.getElementById('status-info') as HTMLSpanElement;
 
 let undoStack: HistEntry[] = [];
 let redoStack: HistEntry[] = [];
+let pageUndoStack: PageSnapshot[] = [];
+let pageRedoStack: PageSnapshot[] = [];
 let autosaveTimer: number | null = null;
 let recoveryTimer: number | null = null;
 let statusHook: () => void = () => {};
@@ -109,6 +120,48 @@ export function clearHistory(): void {
   redoStack = [];
 }
 
+export function clearPageHistory(): void {
+  pageUndoStack = [];
+  pageRedoStack = [];
+}
+
+function pageSnapshot(label: string): PageSnapshot {
+  syncActivePage();
+  return { pages: structuredClone(state.pages), activePage: state.activePage, label };
+}
+
+function restorePageSnapshot(snapshot: PageSnapshot): void {
+  state.pages = snapshot.pages;
+  state.activePage = Math.min(snapshot.pages.length - 1, Math.max(0, snapshot.activePage));
+  state.doc = { app: 'whiteboard-canvas', version: 3, elements: state.pages[state.activePage].elements };
+  state.selectedIds = [];
+  clearHistory();
+  markDirty();
+}
+
+/** 记录页面级操作（如删除），与元素历史独立，由 Ctrl+Z 在元素历史为空时回退 */
+export function pushPageUndo(label: string): void {
+  pageUndoStack.push(pageSnapshot(label));
+  if (pageUndoStack.length > PAGE_HISTORY_LIMIT) pageUndoStack.shift();
+  pageRedoStack = [];
+}
+
+export function undoPage(): boolean {
+  const prev = pageUndoStack.pop();
+  if (!prev) return false;
+  pageRedoStack.push(pageSnapshot(prev.label));
+  restorePageSnapshot(prev);
+  return true;
+}
+
+export function redoPage(): boolean {
+  const next = pageRedoStack.pop();
+  if (!next) return false;
+  pageUndoStack.push(pageSnapshot(next.label));
+  restorePageSnapshot(next);
+  return true;
+}
+
 export function beginMutation(): Doc {
   return structuredClone(state.doc);
 }
@@ -118,6 +171,7 @@ export function commitMutation(before: Doc | null, changed = true, label = '编�
   undoStack.push({ doc: before, label });
   if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
   redoStack = [];
+  pageRedoStack = [];
   markDirty();
 }
 
@@ -219,6 +273,7 @@ export function loadFromText(text: string): void {
   state.pages = pages;
   state.activePage = active;
   state.doc = { app: 'whiteboard-canvas', version: 3, elements: pages[active].elements };
+  clearPageHistory();
 }
 
 export function resetDoc(): void {
@@ -229,6 +284,7 @@ export function resetDoc(): void {
   state.selectedIds = [];
   state.revision = 0;
   clearHistory();
+  clearPageHistory();
 }
 
 export function addPage(name?: string): Page {

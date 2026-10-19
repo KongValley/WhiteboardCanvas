@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   showError: (message) => ipcRenderer.send('app:error', message),
   log: (level, message) => ipcRenderer.send('app:log', level, message),
   confirm: (message, detail) => ipcRenderer.invoke('app:confirm', message, detail),
+  setFullScreen: (on) => ipcRenderer.invoke('win:set-fullscreen', on),
   writeClipboardText: (text) => ipcRenderer.send('clipboard:write-text', text),
   writeClipboardImage: (dataUrl) => ipcRenderer.send('clipboard:write-image', dataUrl),
   readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),

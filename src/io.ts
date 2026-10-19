@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import {
+  Dash,
   El,
   ImageEl,
   PolyEl,
   Pt,
   TextEl,
+  arrowHeadPathD,
   arrowPathD,
+  arrowShaftD,
   boundsUnion,
   centerOf,
+  dashArray,
   inkAbsolutePoints,
   moveEl,
   polyPathD,
@@ -404,13 +408,17 @@ function textFont(el: TextEl): string {
 async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void> {
   if (el.hidden) return;
   const rotation = rotationOf(el);
+  const opacity = el.opacity ?? 1;
+  const needsSave = !!rotation || opacity < 1;
+  if (needsSave) ctx.save();
   if (rotation) {
     const c = centerOf(el);
-    ctx.save();
     ctx.translate(c[0], c[1]);
     ctx.rotate((rotation * Math.PI) / 180);
     ctx.translate(-c[0], -c[1]);
   }
+  if (opacity < 1) ctx.globalAlpha *= opacity;
+  ctx.setLineDash([]);
   switch (el.type) {
     case 'ink': {
       ctx.strokeStyle = el.color;
@@ -420,7 +428,7 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       if (el.highlight) {
         ctx.save();
         ctx.globalCompositeOperation = 'multiply';
-        ctx.globalAlpha = 0.35;
+        ctx.globalAlpha *= 0.35;
       }
       tracePoints(ctx, inkAbsolutePoints(el));
       ctx.stroke();
@@ -435,7 +443,13 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       }
       ctx.strokeStyle = el.stroke;
       ctx.lineWidth = el.strokeWidth;
+      const dash = dashArray(el.dash, el.strokeWidth);
+      if (dash) {
+        ctx.setLineDash(dash);
+        ctx.lineCap = 'round';
+      }
       ctx.stroke(path);
+      ctx.setLineDash([]);
       break;
     }
     case 'poly': {
@@ -446,7 +460,13 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       }
       ctx.strokeStyle = el.stroke;
       ctx.lineWidth = el.strokeWidth;
+      const dash = dashArray(el.dash, el.strokeWidth);
+      if (dash) {
+        ctx.setLineDash(dash);
+        ctx.lineCap = 'round';
+      }
       ctx.stroke(path);
+      ctx.setLineDash([]);
       break;
     }
     case 'ellipse': {
@@ -458,7 +478,13 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       }
       ctx.strokeStyle = el.stroke;
       ctx.lineWidth = el.strokeWidth;
+      const dash = dashArray(el.dash, el.strokeWidth);
+      if (dash) {
+        ctx.setLineDash(dash);
+        ctx.lineCap = 'round';
+      }
       ctx.stroke();
+      ctx.setLineDash([]);
       break;
     }
     case 'arrow': {
@@ -466,7 +492,16 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       ctx.lineWidth = el.strokeWidth;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      ctx.stroke(new Path2D(arrowPathD(el)));
+      const dash = dashArray(el.dash, el.strokeWidth);
+      if (dash) {
+        ctx.setLineDash(dash);
+        ctx.stroke(new Path2D(arrowShaftD(el)));
+        ctx.setLineDash([]);
+        const headD = arrowHeadPathD(el);
+        if (headD) ctx.stroke(new Path2D(headD));
+      } else {
+        ctx.stroke(new Path2D(arrowPathD(el)));
+      }
       if (el.label) {
         const mx = (el.x1 + el.x2) / 2;
         const my = (el.y1 + el.y2) / 2 - 6;
@@ -544,7 +579,7 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       break;
     }
   }
-  if (rotation) ctx.restore();
+  if (needsSave) ctx.restore();
 }
 
 export interface RenderOptions {
@@ -695,6 +730,11 @@ function escXml(value: string): string {
   return value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[ch] as string);
 }
 
+function svgDash(dash: Dash | undefined, width: number): string {
+  const values = dashArray(dash, width);
+  return values ? ` stroke-dasharray="${values.join(' ')}" stroke-linecap="round"` : '';
+}
+
 function svgElText(el: TextEl): string {
   const lh = el.fontSize * (el.lineHeight || 1.4);
   const raw = el.text.split('\n');
@@ -751,8 +791,12 @@ export function buildSvg(elements: El[]): string | null {
   for (const el of visible) {
     const rot = rotationOf(el);
     const c = centerOf(el);
-    const open = rot ? `<g transform="rotate(${rot} ${c[0]} ${c[1]})">` : '';
-    const close = rot ? '</g>' : '';
+    const attrs: string[] = [];
+    if (rot) attrs.push(`transform="rotate(${rot} ${c[0]} ${c[1]})"`);
+    const opacity = el.opacity ?? 1;
+    if (opacity < 1) attrs.push(`opacity="${opacity}"`);
+    const open = attrs.length ? `<g ${attrs.join(' ')}>` : '';
+    const close = attrs.length ? '</g>' : '';
     let part = '';
     switch (el.type) {
       case 'text':
@@ -770,20 +814,29 @@ export function buildSvg(elements: El[]): string | null {
         part = `<path d="${smoothPathD(inkAbsolutePoints(el))}" fill="none" stroke="${escXml(el.color)}" stroke-width="${el.width}" stroke-linecap="round" stroke-linejoin="round"${el.highlight ? ' opacity="0.35" style="mix-blend-mode:multiply"' : ''}/>`;
         break;
       case 'rect':
-        part = `<path d="${rectPathD(el)}" fill="${el.fill ? escXml(el.fill) : 'none'}" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}"/>`;
+        part = `<path d="${rectPathD(el)}" fill="${el.fill ? escXml(el.fill) : 'none'}" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}"${svgDash(el.dash, el.strokeWidth)}/>`;
         break;
       case 'poly':
-        part = `<path d="${polyPathD(el)}" fill="${el.fill ? escXml(el.fill) : 'none'}" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}" stroke-linejoin="round"/>`;
+        part = `<path d="${polyPathD(el)}" fill="${el.fill ? escXml(el.fill) : 'none'}" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}" stroke-linejoin="round"${svgDash(el.dash, el.strokeWidth)}/>`;
         break;
       case 'ellipse':
-        part = `<ellipse cx="${el.x + el.w / 2}" cy="${el.y + el.h / 2}" rx="${Math.max(el.w / 2, 0)}" ry="${Math.max(el.h / 2, 0)}" fill="${el.fill ? escXml(el.fill) : 'none'}" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}"/>`;
+        part = `<ellipse cx="${el.x + el.w / 2}" cy="${el.y + el.h / 2}" rx="${Math.max(el.w / 2, 0)}" ry="${Math.max(el.h / 2, 0)}" fill="${el.fill ? escXml(el.fill) : 'none'}" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}"${svgDash(el.dash, el.strokeWidth)}/>`;
         break;
-      case 'arrow':
-        part = `<path d="${arrowPathD(el)}" fill="none" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"/>`;
+      case 'arrow': {
+        if (el.dash && el.dash !== 'solid') {
+          const headD = arrowHeadPathD(el);
+          part = `<path d="${arrowShaftD(el)}" fill="none" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}"${svgDash(el.dash, el.strokeWidth)}/>`;
+          if (headD) {
+            part += `<path d="${headD}" fill="none" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"/>`;
+          }
+        } else {
+          part = `<path d="${arrowPathD(el)}" fill="none" stroke="${escXml(el.stroke)}" stroke-width="${el.strokeWidth}" stroke-linecap="round" stroke-linejoin="round"/>`;
+        }
         if (el.label) {
           part += `<text x="${(el.x1 + el.x2) / 2}" y="${(el.y1 + el.y2) / 2 - 6}" text-anchor="middle" font-size="14" font-family="${escXml(FONT)}" fill="${escXml(el.stroke)}" stroke="#fff" stroke-width="3" paint-order="stroke">${escXml(el.label)}</text>`;
         }
         break;
+      }
     }
     body += open + part + close;
   }
@@ -832,10 +885,11 @@ export async function saveDocument(forceDialog: boolean): Promise<boolean> {
   return true;
 }
 
-export async function backupNow(): Promise<void> {
+export async function backupNow(): Promise<boolean> {
   commitEditHook();
   const result = await window.api.backupNow(serialize(), state.filePath);
   setStatus(result.path ? '已备份' : '备份失败');
+  return !!result.path;
 }
 
 export async function restoreBackup(): Promise<boolean> {

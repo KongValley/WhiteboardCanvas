@@ -62,6 +62,22 @@ test('serialize/load round-trips multiple pages', () => {
   assert.equal(stateMod.state.doc.elements[0].text, 'world');
 });
 
+test('page deletion can be undone and redone', () => {
+  stateMod.resetDoc();
+  stateMod.addPage('可恢复页');
+  stateMod.switchPage(1);
+  stateMod.state.doc.elements.push({ id: 'keep', type: 'text', x: 0, y: 0, w: 100, h: 20, text: '保留内容', fontSize: 12, color: '#000' });
+  stateMod.pushPageUndo('删除页面');
+  assert.equal(stateMod.removePage(1), true);
+  assert.equal(stateMod.state.pages.length, 1);
+  assert.equal(stateMod.undoPage(), true);
+  assert.equal(stateMod.state.pages.length, 2);
+  assert.equal(stateMod.state.pages[1].name, '可恢复页');
+  assert.equal(stateMod.state.doc.elements[0].text, '保留内容');
+  assert.equal(stateMod.redoPage(), true);
+  assert.equal(stateMod.state.pages.length, 1);
+});
+
 test('page operations keep active page in range', () => {
   stateMod.resetDoc();
   stateMod.addPage('A');

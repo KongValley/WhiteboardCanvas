@@ -2,9 +2,12 @@
 import {
   El,
   PolyEl,
+  arrowHeadPathD,
   arrowPathD,
+  arrowShaftD,
   bounds,
   boundsUnion,
+  dashArray,
   inkAbsolutePoints,
   nearestPointOnRect,
   polyPathD,
@@ -190,6 +193,7 @@ function applyNode(el: El, node: ElNode): void {
   switch (el.type) {
     case 'text': {
       const div = node as HTMLDivElement;
+      s.opacity = String(el.opacity ?? 1);
       s.left = el.x + 'px';
       s.top = el.y + 'px';
       s.width = el.w + 'px';
@@ -213,6 +217,7 @@ function applyNode(el: El, node: ElNode): void {
       break;
     }
     case 'image': {
+      s.opacity = String(el.opacity ?? 1);
       s.left = el.x + 'px';
       s.top = el.y + 'px';
       s.width = el.w + 'px';
@@ -237,8 +242,10 @@ function applyNode(el: El, node: ElNode): void {
       s.height = Math.max(el.h, 0) + 'px';
       s.boxSizing = 'border-box';
       s.border = el.strokeWidth + 'px solid ' + el.stroke;
+      s.borderStyle = el.dash === 'dash' ? 'dashed' : el.dash === 'dot' ? 'dotted' : 'solid';
       s.borderRadius = el.type === 'ellipse' ? '50%' : (el.radius || 0) + 'px';
       s.background = el.fill || 'transparent';
+      s.opacity = String(el.opacity ?? 1);
       s.transform = rotation ? `rotate(${rotation}deg)` : '';
       break;
     }
@@ -253,6 +260,7 @@ function applyNode(el: El, node: ElNode): void {
       const svg = node as SVGSVGElement;
       svg.setAttribute('viewBox', `${b.x - pad} ${b.y - pad} ${b.w + pad * 2} ${b.h + pad * 2}`);
       svg.setAttribute('overflow', 'visible');
+      s.opacity = String(el.opacity ?? 1);
       renderPolyPath(svg, el);
       s.transform = rotation ? `rotate(${rotation}deg)` : '';
       break;
@@ -264,7 +272,7 @@ function applyNode(el: El, node: ElNode): void {
       s.width = el.w + pad * 2 + 'px';
       s.height = el.h + pad * 2 + 'px';
       s.mixBlendMode = el.highlight ? 'multiply' : 'normal';
-      s.opacity = el.highlight ? '0.35' : '1';
+      s.opacity = String((el.opacity ?? 1) * (el.highlight ? 0.35 : 1));
       const svg = node as SVGSVGElement;
       svg.setAttribute('viewBox', `${el.x - pad} ${el.y - pad} ${el.w + pad * 2} ${el.h + pad * 2}`);
       svg.setAttribute('overflow', 'visible');
@@ -282,6 +290,7 @@ function applyNode(el: El, node: ElNode): void {
       const svg = node as SVGSVGElement;
       svg.setAttribute('viewBox', `${b.x - pad} ${b.y - pad} ${b.w + pad * 2} ${b.h + pad * 2}`);
       svg.setAttribute('overflow', 'visible');
+      s.opacity = String(el.opacity ?? 1);
       renderArrowPath(svg, el);
       s.transform = rotation ? `rotate(${rotation}deg)` : '';
       break;
@@ -307,18 +316,38 @@ function renderPolyPath(svg: SVGSVGElement, el: PolyEl): void {
   path.setAttribute('stroke', el.stroke);
   path.setAttribute('stroke-width', String(el.strokeWidth));
   path.setAttribute('stroke-linejoin', 'round');
+  const dash = dashArray(el.dash, el.strokeWidth);
+  if (dash) {
+    path.setAttribute('stroke-dasharray', dash.join(' '));
+    path.setAttribute('stroke-linecap', 'round');
+  }
   svg.replaceChildren(path);
 }
 
 function renderArrowPath(svg: SVGSVGElement, el: Extract<El, { type: 'arrow' }>): void {
+  const dash = dashArray(el.dash, el.strokeWidth);
   const path = document.createElementNS(SVG_NS, 'path');
-  path.setAttribute('d', arrowPathD(el));
+  path.setAttribute('d', dash ? arrowShaftD(el) : arrowPathD(el));
   path.setAttribute('fill', 'none');
   path.setAttribute('stroke', el.stroke);
   path.setAttribute('stroke-width', String(el.strokeWidth));
   path.setAttribute('stroke-linecap', 'round');
   path.setAttribute('stroke-linejoin', 'round');
+  if (dash) path.setAttribute('stroke-dasharray', dash.join(' '));
   const children: SVGElement[] = [path];
+  if (dash) {
+    const headD = arrowHeadPathD(el);
+    if (headD) {
+      const head = document.createElementNS(SVG_NS, 'path');
+      head.setAttribute('d', headD);
+      head.setAttribute('fill', 'none');
+      head.setAttribute('stroke', el.stroke);
+      head.setAttribute('stroke-width', String(el.strokeWidth));
+      head.setAttribute('stroke-linecap', 'round');
+      head.setAttribute('stroke-linejoin', 'round');
+      children.push(head);
+    }
+  }
   if (el.label) {
     const text = document.createElementNS(SVG_NS, 'text');
     const mx = (el.x1 + el.x2) / 2;

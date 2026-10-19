@@ -397,7 +397,8 @@ function buildMenu() {
           label: '查看',
           submenu: [
             { label: '图层面板', click: () => sendMenu('toggle-panels') },
-            { label: '搜索画布', click: () => sendMenu('search') }
+            { label: '搜索画布', click: () => sendMenu('search') },
+            { label: '演示模式', click: () => sendMenu('present') }
           ]
         },
         { type: 'separator' },
@@ -443,6 +444,7 @@ function buildMenu() {
     '查看': 'View',
     '图层面板': 'Layers panel',
     '搜索画布': 'Search canvas',
+    '演示模式': 'Presentation mode',
     '设置…': 'Settings…',
     '退出': 'Quit',
     '帮助': 'Help',
@@ -1092,6 +1094,14 @@ function registerIpc() {
 
   ipcMain.on('save-result', () => {
     /* 由 close 流程中的 ipcMain.once 消费 */
+  });
+
+  ipcMain.handle('win:set-fullscreen', (e, on) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (!w || w.isDestroyed()) return false;
+    const was = w.isFullScreen();
+    w.setFullScreen(on === true);
+    return was;
   });
 
   ipcMain.handle('settings:get', async () => store.loadSettings());

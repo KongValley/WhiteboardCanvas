@@ -53,3 +53,38 @@ test('sanitizeEl rejects oversized or invalid input', () => {
   assert.deepEqual(crop.crop, { x: 0.1, y: 0.2, w: 0.5, h: 0.6 });
   assert.equal(crop.flipH, true);
 });
+
+test('align and distribute deltas use the selection bounds', () => {
+  const rects = [
+    { x: 0, y: 0, w: 10, h: 10 },
+    { x: 50, y: 20, w: 20, h: 10 },
+    { x: 100, y: 40, w: 10, h: 10 }
+  ];
+  assert.deepEqual(model.alignDeltas(rects, 'left'), [[0, 0], [-50, 0], [-100, 0]]);
+  assert.deepEqual(model.alignDeltas(rects, 'right'), [[100, 0], [40, 0], [0, 0]]);
+  assert.deepEqual(model.alignDeltas(rects, 'hcenter'), [[50, 0], [-5, 0], [-50, 0]]);
+  const distributed = model.distributeDeltas(rects, 'x');
+  assert.ok(Math.abs(distributed[0][0]) < 1e-6);
+  assert.ok(Math.abs(distributed[1][0] + 5) < 1e-6);
+  assert.ok(Math.abs(distributed[2][0]) < 1e-6);
+  assert.deepEqual(model.alignDeltas([rects[0]], 'left'), [[0, 0]]);
+});
+
+test('dash and opacity are sanitized', () => {
+  assert.equal(model.dashArray('solid', 2), null);
+  assert.deepEqual(model.dashArray('dash', 2), [8, 6]);
+  assert.deepEqual(model.dashArray('dot', 2), [0.1, 4.4]);
+  const styled = model.sanitizeEl({
+    type: 'rect', x: 0, y: 0, w: 10, h: 10, strokeWidth: 2, dash: 'dot', opacity: 0.5
+  });
+  assert.equal(styled.dash, 'dot');
+  assert.equal(styled.opacity, 0.5);
+  const tooFaint = model.sanitizeEl({
+    type: 'rect', x: 0, y: 0, w: 10, h: 10, strokeWidth: 2, opacity: 0.05
+  });
+  assert.equal(tooFaint.opacity, undefined);
+  const full = model.sanitizeEl({
+    type: 'rect', x: 0, y: 0, w: 10, h: 10, strokeWidth: 2, opacity: 1
+  });
+  assert.equal(full.opacity, undefined);
+});

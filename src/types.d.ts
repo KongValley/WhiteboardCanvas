@@ -63,6 +63,8 @@ export interface ElementInfo {
   fill?: string;
   head?: boolean;
   highlight?: boolean;
+  dash?: 'solid' | 'dash' | 'dot';
+  opacity?: number;
 }
 
 export interface Api {
@@ -76,6 +78,7 @@ export interface Api {
   showError(message: string): void;
   log(level: 'info' | 'warn' | 'error', message: string): void;
   confirm(message: string, detail?: string): Promise<boolean>;
+  setFullScreen(on: boolean): Promise<boolean>;
   writeClipboardText(text: string): void;
   writeClipboardImage(dataUrl: string): void;
   readClipboardText(): Promise<string>;
@@ -103,6 +106,8 @@ export interface TestApi {
   select(ids: string[]): void;
   duplicate(): number;
   nudge(dx: number, dy: number): void;
+  align(mode: 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom'): void;
+  distribute(axis: 'x' | 'y'): void;
   bringToFront(): void;
   sendToBack(): void;
   clipboardJson(): string;
@@ -133,6 +138,9 @@ export interface TestApi {
   imageFit(id: string, mode: 'original' | 'fit-width'): void;
   gridSnapEnabled(): boolean;
   setView(zoom: number, panX: number, panY: number): void;
+  present(on: boolean): Promise<boolean>;
+  isPresenting(): boolean;
+  presentPage(delta: number): boolean;
   mountedCount(): number;
   printPdfTo(path: string): Promise<boolean>;
   addPoly(kind: 'triangle' | 'diamond' | 'star' | 'roundrect', x: number, y: number, w: number, h: number): string;
@@ -153,8 +161,10 @@ export interface TestApi {
   search(text: string): string[];
   exportSvgTo(path: string): Promise<boolean>;
   pageNames(): string[];
+  activePage(): number;
   addPage(name: string): string;
   removePage(index: number): boolean;
+  deletePage(index: number): Promise<boolean>;
   switchPage(index: number): boolean;
   crop(id: string, crop: { x: number; y: number; w: number; h: number }, flipH: boolean, flipV: boolean): Promise<boolean>;
   compress(id: string, mime: string, quality: number): Promise<boolean>;

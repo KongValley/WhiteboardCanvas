@@ -16,6 +16,7 @@ export type Tool =
 export type PolyKind = 'triangle' | 'diamond' | 'star' | 'roundrect';
 export type ElType = 'text' | 'image' | 'ink' | 'rect' | 'ellipse' | 'arrow' | 'poly';
 export type Align = 'left' | 'center' | 'right';
+export type Dash = 'solid' | 'dash' | 'dot';
 
 export interface Rect {
   x: number;
@@ -31,6 +32,8 @@ interface Base {
   groupId?: string;
   locked?: boolean;
   hidden?: boolean;
+  /** 0.1–1，缺省为不透明 */
+  opacity?: number;
   /** 图层面板显示名 */
   name?: string;
 }
@@ -91,6 +94,7 @@ export interface RectEl extends Base {
   stroke: string;
   strokeWidth: number;
   fill: string;
+  dash?: Dash;
   radius?: number;
 }
 
@@ -103,6 +107,7 @@ export interface EllipseEl extends Base {
   stroke: string;
   strokeWidth: number;
   fill: string;
+  dash?: Dash;
 }
 
 export interface ArrowEl extends Base {
@@ -115,6 +120,7 @@ export interface ArrowEl extends Base {
   strokeWidth: number;
   /** false 表示直线（无箭头）；旧文件缺省为 true */
   head: boolean;
+  dash?: Dash;
   label?: string;
   fromId?: string;
   toId?: string;
@@ -130,6 +136,7 @@ export interface PolyEl extends Base {
   stroke: string;
   strokeWidth: number;
   fill: string;
+  dash?: Dash;
   radius?: number;
 }
 
@@ -217,6 +224,68 @@ export function boundsUnion(els: El[]): Rect | null {
   return boundsOfPoints(points);
 }
 
+export type AlignMode = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom';
+
+/** 计算对齐到选区整体包围盒所需的位移，顺序与输入一致 */
+export function alignDeltas(rects: Rect[], mode: AlignMode): Pt[] {
+  if (rects.length < 2) return rects.map(() => [0, 0] as Pt);
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const r of rects) {
+    left = Math.min(left, r.x);
+    top = Math.min(top, r.y);
+    right = Math.max(right, r.x + r.w);
+    bottom = Math.max(bottom, r.y + r.h);
+  }
+  const cx = (left + right) / 2;
+  const cy = (top + bottom) / 2;
+  return rects.map((r) => {
+    switch (mode) {
+      case 'left':
+        return [left - r.x, 0] as Pt;
+      case 'right':
+        return [right - (r.x + r.w), 0] as Pt;
+      case 'hcenter':
+        return [cx - (r.x + r.w / 2), 0] as Pt;
+      case 'top':
+        return [0, top - r.y] as Pt;
+      case 'bottom':
+        return [0, bottom - (r.y + r.h)] as Pt;
+      case 'vcenter':
+        return [0, cy - (r.y + r.h / 2)] as Pt;
+    }
+    return [0, 0] as Pt;
+  });
+}
+
+/** 计算等距分布位移：首尾固定，中间元素按包围盒宽度均分间隙 */
+export function distributeDeltas(rects: Rect[], axis: 'x' | 'y'): Pt[] {
+  const deltas = rects.map(() => [0, 0] as Pt);
+  if (rects.length < 3) return deltas;
+  const order = rects
+    .map((r, index) => ({ index, start: axis === 'x' ? r.x : r.y, size: axis === 'x' ? r.w : r.h }))
+    .sort((a, b) => a.start - b.start || a.index - b.index);
+  const first = order[0];
+  const last = order[order.length - 1];
+  const span = last.start + last.size - first.start;
+  const total = order.reduce((sum, item) => sum + item.size, 0);
+  const gap = (span - total) / (order.length - 1);
+  let cursor = first.start;
+  for (const item of order) {
+    deltas[item.index] = axis === 'x' ? [cursor - item.start, 0] : [0, cursor - item.start];
+    cursor += item.size + gap;
+  }
+  return deltas;
+}
+
+export function dashArray(dash: Dash | undefined, width: number): number[] | null {
+  if (!dash || dash === 'solid') return null;
+  const w = Math.max(1, width);
+  return dash === 'dash' ? [Math.max(4, w * 4), Math.max(3, w * 3)] : [0.1, Math.max(2, w * 2.2)];
+}
+
 export function rectsIntersect(a: Rect, b: Rect): boolean {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
@@ -291,6 +360,16 @@ export function arrowPathD(el: ArrowEl): string {
   if (!el.head) return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2}`;
   const [h1, h2] = arrowHeadPoints(el);
   return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2} M ${h1[0]} ${h1[1]} L ${el.x2} ${el.y2} M ${h2[0]} ${h2[1]} L ${el.x2} ${el.y2}`;
+}
+
+export function arrowShaftD(el: ArrowEl): string {
+  return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2}`;
+}
+
+export function arrowHeadPathD(el: ArrowEl): string | null {
+  if (!el.head) return null;
+  const [h1, h2] = arrowHeadPoints(el);
+  return `M ${h1[0]} ${h1[1]} L ${el.x2} ${el.y2} M ${h2[0]} ${h2[1]} L ${el.x2} ${el.y2}`;
 }
 
 export function polyVertices(el: PolyEl): Pt[] {
@@ -503,10 +582,16 @@ function fillColor(value: unknown): string {
   return typeof value === 'string' && value.length <= 64 && COLOR_RE.test(value) ? value : '';
 }
 
+function dashValue(value: unknown): Dash | undefined {
+  return value === 'dash' || value === 'dot' || value === 'solid' ? value : undefined;
+}
+
 function base(raw: Record<string, unknown>, fallbackId: string): Omit<Base, never> {
   const out: Base = { id: str(raw.id, 64) || fallbackId };
   const rotation = num(raw.rotation, 3600);
   if (rotation) out.rotation = rotation;
+  const opacity = num(raw.opacity, 1);
+  if (opacity !== null && opacity >= 0.1 && opacity < 1) out.opacity = opacity;
   const groupId = str(raw.groupId, 64);
   if (groupId) out.groupId = groupId;
   const name = str(raw.name, 200);
@@ -630,6 +715,7 @@ export function sanitizeEl(raw: unknown): El | null {
           stroke,
           strokeWidth,
           fill: fillColor(o.fill),
+          dash: dashValue(o.dash),
           radius: o.type === 'rect' && radius !== null && radius > 0 ? radius : undefined
         };
       }
@@ -653,6 +739,7 @@ export function sanitizeEl(raw: unknown): El | null {
           stroke,
           strokeWidth,
           fill: fillColor(o.fill),
+          dash: dashValue(o.dash),
           radius: radius !== null && radius > 0 ? radius : undefined
         };
       }
@@ -673,6 +760,7 @@ export function sanitizeEl(raw: unknown): El | null {
           stroke,
           strokeWidth,
           head: o.head !== false,
+          dash: dashValue(o.dash),
           label: str(o.label, 2000) || undefined,
           fromId: str(o.fromId, 64) || undefined,
           toId: str(o.toId, 64) || undefined

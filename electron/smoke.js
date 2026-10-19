@@ -16,6 +16,7 @@ module.exports = async function runSmoke(win) {
   const tmpBadZip = path.join(os.tmpdir(), `wbc-smoke-${stamp}-badzip.wbc`);
   const tmpPdf = path.join(os.tmpdir(), `wbc-smoke-${stamp}.pdf`);
   const tmpSvg = path.join(os.tmpdir(), `wbc-smoke-${stamp}.svg`);
+  const tmpStyleSvg = path.join(os.tmpdir(), `wbc-smoke-${stamp}-style.svg`);
   const tmpPages = path.join(os.tmpdir(), `wbc-smoke-${stamp}-pages.wbc`);
   const tmpRepairJson = path.join(os.tmpdir(), `wbc-smoke-${stamp}-repair.wbc`);
   const tmpRepairZip = path.join(os.tmpdir(), `wbc-smoke-${stamp}-repairzip.wbc`);
@@ -371,6 +372,165 @@ module.exports = async function runSmoke(win) {
       Math.abs(unresized[1].x - 300) < 0.001;
     check('multi-resize', multiOk, { resized, unresized });
 
+    // SEL-07：多选缩放必须包含 PolyEl
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    await run("__test.addPoly('triangle', 100, 100, 100, 100)");
+    await run("__test.addShape('rect', 300, 100, 100, 100)");
+    await run('__test.selectAll()');
+    const polyResized = await run(
+      "(() => {var vp=document.getElementById('viewport');var r=vp.getBoundingClientRect();" +
+        "var h=document.querySelector('#selection .handle.se');if(!h)return null;" +
+        "h.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,clientX:r.left+400,clientY:r.top+200,button:0,buttons:1,pointerId:32,pointerType:'mouse',altKey:true}));" +
+        "vp.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,cancelable:true,clientX:r.left+500,clientY:r.top+300,button:0,buttons:1,pointerId:32,pointerType:'mouse',altKey:true}));" +
+        "vp.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,clientX:r.left+500,clientY:r.top+300,button:0,buttons:0,pointerId:32,pointerType:'mouse',altKey:true}));" +
+        "return __test.elements();})()"
+    );
+    await run('__test.undo()');
+    const polyUndone = await run('__test.elements()');
+    const polyResizedEl = Array.isArray(polyResized) ? polyResized.find((el) => el.type === 'poly') : null;
+    const polyUndoneEl = Array.isArray(polyUndone) ? polyUndone.find((el) => el.type === 'poly') : null;
+    check(
+      'multi-resize-poly',
+      !!polyResizedEl && Math.abs(polyResizedEl.w - 133.333) < 0.5 && Math.abs(polyResizedEl.h - 200) < 0.5 &&
+        !!polyUndoneEl && Math.abs(polyUndoneEl.w - 100) < 0.001,
+      { polyResizedEl, polyUndoneEl }
+    );
+
+    // SEL-06：对齐 / 分布（一步撤销）
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    await run("__test.addShape('rect', 100, 100, 50, 50)");
+    await run("__test.addShape('rect', 300, 120, 100, 60)");
+    await run("__test.addShape('rect', 600, 400, 50, 50)");
+    await run('__test.selectAll()');
+    await run("__test.align('left')");
+    const aligned = await run('__test.elements()');
+    await run('__test.undo()');
+    const alignUndone = await run('__test.elements()');
+    await run('__test.selectAll()');
+    await run("__test.distribute('x')");
+    const distributed = await run('__test.elements()');
+    const alignOk = aligned.every((el) => Math.abs(el.x - 100) < 0.001);
+    const alignUndoOk = alignUndone.map((el) => Math.round(el.x)).join(',') === '100,300,600';
+    const distributeOk =
+      distributed.length === 3 &&
+      Math.abs(distributed[0].x - 100) < 0.001 &&
+      Math.abs(distributed[1].x - 325) < 0.001 &&
+      Math.abs(distributed[2].x - 600) < 0.001;
+    check('align-distribute', alignOk && alignUndoOk && distributeOk, { aligned, alignUndone, distributed });
+
+    // 对齐后连接线端点必须跟随更新
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    const alignA = await run("__test.addShape('rect', 100, 100, 80, 80)");
+    const alignB = await run("__test.addShape('rect', 400, 300, 80, 80)");
+    const alignConn = await run('__test.connect(' + j(alignA) + ',' + j(alignB) + ')');
+    const connBeforeAlign = await run('__test.el(' + j(alignConn) + ')');
+    await run('__test.select(' + j([alignA, alignB]) + ')');
+    await run("__test.align('top')");
+    const connAfterAlign = await run('__test.el(' + j(alignConn) + ')');
+    await run('__test.undo()');
+    const connUndone = await run('__test.el(' + j(alignConn) + ')');
+    check(
+      'align-connector',
+      connBeforeAlign && connAfterAlign && connUndone &&
+        Math.abs(connBeforeAlign.y2 - connAfterAlign.y2) > 100 &&
+        Math.abs(connUndone.y2 - connBeforeAlign.y2) < 0.001,
+      { connBeforeAlign, connAfterAlign, connUndone }
+    );
+
+    // EDT-19/20：线型与透明度贯通控件、DOM、SVG 与保存
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    const styleId = await run("__test.addShape('rect', 100, 100, 100, 100)");
+    await run('__test.select(' + j([styleId]) + ')');
+    const dashValue = await run(
+      "(() => {document.querySelector('[data-row=\"dash\"] button[data-value=\"dash\"]').click();return __test.el(" + j(styleId) + ").dash;})()"
+    );
+    const opacityValue = await run(
+      "(() => {const r=document.getElementById('opacity-range');r.value='50';r.dispatchEvent(new Event('change'));return __test.el(" + j(styleId) + ").opacity;})()"
+    );
+    const styleDom = await run(
+      "(() => {const n=document.querySelector('[data-id=\"" + styleId + "\"]');return {opacity:n.style.opacity,border:n.style.borderStyle};})()"
+    );
+    const styleSvg = await run('__test.exportSvgTo(' + j(tmpStyleSvg) + ')');
+    let styleSvgOk = false;
+    try {
+      const text = fs.readFileSync(tmpStyleSvg, 'utf8');
+      styleSvgOk = styleSvg === true && text.includes('stroke-dasharray') && text.includes('opacity="0.5"');
+    } catch {
+      styleSvgOk = false;
+    }
+    await run('__test.saveTo(' + j(tmpWbc) + ')');
+    const styleSaved = readDoc();
+    const savedStyle = styleSaved && styleSaved.elements && styleSaved.elements.find((el) => el.id === styleId);
+    check(
+      'stroke-dash-opacity',
+      dashValue === 'dash' && opacityValue === 0.5 && styleDom.opacity === '0.5' && styleDom.border === 'dashed' &&
+        styleSvgOk && savedStyle && savedStyle.dash === 'dash' && savedStyle.opacity === 0.5,
+      { dashValue, opacityValue, styleDom, styleSvgOk, savedStyle }
+    );
+
+    // FILE-16：删除页面前备份 + 撤销/重做
+    await run('__test.reset()');
+    await run("__test.addText('页一', 100, 100)");
+    await run("__test.addPage('第二页')");
+    await run('__test.switchPage(1)');
+    await run("__test.addText('页二', 100, 100)");
+    const pageBackupsBefore = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
+    const pageDeleted = await run('__test.deletePage(1)');
+    const pageBackupsAfter = fs.existsSync(backupsDir) ? fs.readdirSync(backupsDir).length : 0;
+    const afterDelete = await run('({names:__test.pageNames(),active:__test.activePage(),count:__test.count()})');
+    const pageUndone = await run('__test.undo()');
+    const afterUndoPage = await run('({names:__test.pageNames(),active:__test.activePage(),count:__test.count()})');
+    const pageRedone = await run('__test.redo()');
+    const afterRedoPage = await run('({names:__test.pageNames(),active:__test.activePage()})');
+    check(
+      'page-delete-undo',
+      pageDeleted === true && pageBackupsAfter > pageBackupsBefore && afterDelete.names.length === 1 &&
+        pageUndone === true && afterUndoPage.names.length === 2 && afterUndoPage.active === 1 && afterUndoPage.count === 1 &&
+        pageRedone === true && afterRedoPage.names.length === 1,
+      { pageDeleted, pageBackupsBefore, pageBackupsAfter, afterDelete, pageUndone, afterUndoPage, pageRedone, afterRedoPage }
+    );
+
+    // UI-12：演示模式隐藏界面、翻页并恢复视图
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    await run("__test.addText('演示页', 100, 100)");
+    await run("__test.addPage('第二页')");
+    await run('__test.setView(1, 0, 0)');
+    const presentZoom = await run('__test.zoomPercent()');
+    await run("window.dispatchEvent(new KeyboardEvent('keydown',{key:'F5',bubbles:true,cancelable:true}))");
+    let presentEntered = false;
+    for (let i = 0; i < 40 && !presentEntered; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      presentEntered = await run('__test.isPresenting()');
+    }
+    const presentDom = await run(
+      "({active:__test.isPresenting(),body:document.body.classList.contains('presenting')," +
+        "toolbar:getComputedStyle(document.getElementById('toolbar')).display," +
+        "topbar:getComputedStyle(document.getElementById('topbar')).display})"
+    );
+    const presentMoved = await run('__test.presentPage(1)');
+    const presentPageIndex = await run('__test.activePage()');
+    await run("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+    let presentExited = false;
+    for (let i = 0; i < 40 && !presentExited; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      presentExited = !(await run('__test.isPresenting()'));
+    }
+    const presentRestored = await run(
+      "({active:__test.isPresenting(),body:document.body.classList.contains('presenting'),zoom:__test.zoomPercent()})"
+    );
+    check(
+      'presentation-mode',
+      presentEntered === true && presentDom.active === true && presentDom.body === true &&
+        presentDom.toolbar === 'none' && presentDom.topbar === 'none' && presentMoved === true && presentPageIndex === 1 &&
+        presentExited === true && presentRestored.active === false && presentRestored.body === false && presentRestored.zoom === presentZoom,
+      { presentZoom, presentEntered, presentDom, presentMoved, presentPageIndex, presentExited, presentRestored }
+    );
+
     // 缩放到选中 + 百分比输入
     await run('__test.reset()');
     await run("__test.addShape('rect', 100, 100, 100, 100)");
@@ -515,9 +675,10 @@ module.exports = async function runSmoke(win) {
       settingsRoundTrip
     );
 
-    // 崩溃恢复快照（3 秒内，含未提交的编辑草稿）与清除
+    // 崩溃恢复快照（3 秒内，含未提交的编辑草稿与多页结构）与清除
     await run('__test.reset()');
     await run("__test.addText('恢复测试', 100, 100)");
+    await run("__test.addPage('第二页')");
     const editOpened = await run(
       "(() => {const vp=document.getElementById('viewport');const r=vp.getBoundingClientRect();" +
         "vp.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,clientX:r.left+150,clientY:r.top+115}));" +
@@ -531,7 +692,9 @@ module.exports = async function runSmoke(win) {
     if (recoveryExists) {
       try {
         const doc = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'));
-        recoveryOk = doc.elements.some((el) => el.type === 'text' && el.text === '恢复测试草稿');
+        recoveryOk =
+          doc.pages && doc.pages.length === 2 && doc.activePage === 0 &&
+          doc.pages[0].elements.some((el) => el.type === 'text' && el.text === '恢复测试草稿');
       } catch {
         recoveryOk = false;
       }
@@ -584,13 +747,14 @@ module.exports = async function runSmoke(win) {
     await run('togglePanels = true');
     const p2panels = await run(
       "(() => {document.getElementById('panel-btn').click();const rows=document.querySelectorAll('.layer-row').length;" +
-        "const tabs=document.querySelectorAll('.panel-tabs button');tabs[1].click();const history=document.querySelectorAll('.history-row').length;" +
-        "document.getElementById('panel-btn').click();return {rows,history,label:__test.elementLabel(__test.order()[0])};})()"
+        "const tabs=document.querySelectorAll('.panel-tabs button');const icons=document.querySelectorAll('#sidepanel svg').length;" +
+        "tabs[1].click();const history=document.querySelectorAll('.history-row').length;" +
+        "document.getElementById('panel-btn').click();return {rows,history,icons,label:__test.elementLabel(__test.order()[0])};})()"
     );
     const p2lasso = await run(
       '__test.lasso([[90,90],[280,90],[280,220],[90,220]], false)'
     );
-    check('p2-panels-search-lasso', p2search.length === 1 && p2panels.rows === 2 && p2panels.history > 0 && p2lasso.length >= 1, { p2search, p2panels, p2lasso });
+    check('p2-panels-search-lasso', p2search.length === 1 && p2panels.rows === 2 && p2panels.history > 0 && p2panels.icons >= 6 && p2lasso.length >= 1, { p2search, p2panels, p2lasso });
 
     await run('__test.reset()');
     const fmtA = await run("__test.addShape('rect', 100, 100, 80, 80)");
@@ -777,7 +941,7 @@ module.exports = async function runSmoke(win) {
     console.log('FAIL smoke-exception ' + String((err && err.message) || err));
   }
 
-  for (const file of [tmpWbc, tmpPng, tmpZip, tmpSelPng, tmpV1, tmpBad, tmpBadZip, tmpPdf, tmpSvg, tmpPages, tmpRepairJson, tmpRepairZip]) {
+  for (const file of [tmpWbc, tmpPng, tmpZip, tmpSelPng, tmpV1, tmpBad, tmpBadZip, tmpPdf, tmpSvg, tmpStyleSvg, tmpPages, tmpRepairJson, tmpRepairZip]) {
     try {
       fs.unlinkSync(file);
     } catch {

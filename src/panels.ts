@@ -3,6 +3,7 @@ import { El } from './model';
 import { beginMutation, commitMutation, historyEntries, jumpToHistory, state } from './state';
 import { describeEl, renderAll } from './render';
 import { openPrompt } from './dialogs';
+import { uiIcon } from './icons';
 
 interface Hooks {
   select(ids: string[]): void;
@@ -33,8 +34,11 @@ export function installPanels(h: Hooks): void {
   tabs.className = 'panel-tabs';
   for (const tab of ['layers', 'history'] as const) {
     const button = document.createElement('button');
+    const label = tab === 'layers' ? '图层' : '历史';
     button.dataset.tab = tab;
-    button.textContent = tab === 'layers' ? '图层' : '历史';
+    button.innerHTML = uiIcon(tab === 'layers' ? 'layers' : 'history') + `<span>${label}</span>`;
+    button.title = label;
+    button.setAttribute('aria-label', label);
     button.addEventListener('click', () => {
       activeTab = tab;
       refreshPanels();
@@ -72,11 +76,12 @@ export function refreshPanels(): void {
   if (activeTab === 'history' && historyBody) renderHistory(historyBody);
 }
 
-function makeIconButton(text: string, title: string, action: () => void): HTMLButtonElement {
+function makeIconButton(icon: string, title: string, action: () => void): HTMLButtonElement {
   const button = document.createElement('button');
   button.className = 'panel-icon';
-  button.textContent = text;
+  button.innerHTML = icon;
   button.title = title;
+  button.setAttribute('aria-label', title);
   button.addEventListener('click', (e) => {
     e.stopPropagation();
     action();
@@ -104,10 +109,10 @@ function renderLayers(body: HTMLDivElement): void {
     row.classList.toggle('selected', selected.has(el.id));
     row.classList.toggle('muted', !!el.hidden);
     row.classList.toggle('locked', !!el.locked);
-    const eye = makeIconButton(el.hidden ? '○' : '●', el.hidden ? '显示' : '隐藏', () => {
+    const eye = makeIconButton(uiIcon(el.hidden ? 'eyeOff' : 'eye'), el.hidden ? '显示' : '隐藏', () => {
       toggleLayer(el.id, 'hidden');
     });
-    const lock = makeIconButton(el.locked ? '🔒' : '🔓', el.locked ? '解锁' : '锁定', () => {
+    const lock = makeIconButton(uiIcon(el.locked ? 'lock' : 'unlock'), el.locked ? '解锁' : '锁定', () => {
       toggleLayer(el.id, 'locked');
     });
     const name = document.createElement('span');
