@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 export type Pt = [number, number];
-export type Tool = 'select' | 'pen' | 'eraser' | 'text' | 'rect' | 'ellipse' | 'arrow';
+export type Tool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'text' | 'rect' | 'ellipse' | 'arrow' | 'line';
 export type ElType = 'text' | 'image' | 'ink' | 'rect' | 'ellipse' | 'arrow';
 
 export interface Rect {
@@ -43,6 +43,7 @@ export interface InkEl extends Base {
   points: Pt[];
   color: string;
   width: number;
+  highlight?: boolean;
 }
 
 export interface RectEl extends Base {
@@ -53,6 +54,7 @@ export interface RectEl extends Base {
   h: number;
   stroke: string;
   strokeWidth: number;
+  fill: string;
 }
 
 export interface EllipseEl extends Base {
@@ -63,6 +65,7 @@ export interface EllipseEl extends Base {
   h: number;
   stroke: string;
   strokeWidth: number;
+  fill: string;
 }
 
 export interface ArrowEl extends Base {
@@ -73,6 +76,8 @@ export interface ArrowEl extends Base {
   y2: number;
   stroke: string;
   strokeWidth: number;
+  /** false 表示直线（无箭头）；旧文件缺省为 true */
+  head: boolean;
 }
 
 export type El = TextEl | ImageEl | InkEl | RectEl | EllipseEl | ArrowEl;
@@ -179,6 +184,12 @@ export function arrowHeadPoints(el: ArrowEl): [Pt, Pt] {
   return [rotate(1), rotate(-1)];
 }
 
+export function arrowPathD(el: ArrowEl): string {
+  if (!el.head) return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2}`;
+  const [h1, h2] = arrowHeadPoints(el);
+  return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2} M ${h1[0]} ${h1[1]} L ${el.x2} ${el.y2} M ${h2[0]} ${h2[1]} L ${el.x2} ${el.y2}`;
+}
+
 export function moveEl(el: El, dx: number, dy: number): void {
   if (el.type === 'arrow') {
     el.x1 += dx;
@@ -212,12 +223,25 @@ export function normalizeInk(points: Pt[]): { x: number; y: number; w: number; h
   };
 }
 
+/** 判断点是否在形状内部（含填充时用于命中） */
+function insideShape(el: RectEl | EllipseEl, p: Pt): boolean {
+  const b = bounds(el);
+  if (el.type === 'rect') {
+    return p[0] >= b.x && p[0] <= b.x + b.w && p[1] >= b.y && p[1] <= b.y + b.h;
+  }
+  const rx = Math.max(b.w / 2, 0.001);
+  const ry = Math.max(b.h / 2, 0.001);
+  const k = Math.hypot((p[0] - (b.x + rx)) / rx, (p[1] - (b.y + ry)) / ry);
+  return k <= 1;
+}
+
 function hitEl(el: El, p: Pt, tol: number): boolean {
   switch (el.type) {
     case 'text':
     case 'image':
       return p[0] >= el.x - 2 && p[0] <= el.x + el.w + 2 && p[1] >= el.y - 2 && p[1] <= el.y + el.h + 2;
     case 'rect': {
+      if (el.fill && insideShape(el, p)) return true;
       const b = bounds(el);
       if (p[0] >= b.x && p[0] <= b.x + b.w && p[1] >= b.y && p[1] <= b.y + b.h) {
         const d = Math.min(p[0] - b.x, b.x + b.w - p[0], p[1] - b.y, b.y + b.h - p[1]);
@@ -232,6 +256,7 @@ function hitEl(el: El, p: Pt, tol: number): boolean {
       const rx = Math.max(b.w / 2, 0.001);
       const ry = Math.max(b.h / 2, 0.001);
       const k = Math.hypot((p[0] - (b.x + rx)) / rx, (p[1] - (b.y + ry)) / ry);
+      if (el.fill && k <= 1) return true;
       return Math.abs(k - 1) * Math.min(rx, ry) <= tol;
     }
     case 'arrow':
@@ -257,72 +282,116 @@ export function hitTest(els: El[], p: Pt, tol: number): El | null {
   return null;
 }
 
-function num(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+const MAX_TEXT = 200000;
+const MAX_POINTS = 200000;
+const MAX_SRC = 96 * 1024 * 1024;
+const MAX_COORD = 1e7;
+const COLOR_RE = /^(#(?:[0-9a-f]{3,8})|rgba?\([0-9.,%\s/]+\)|transparent)$/i;
+
+function num(value: unknown, max = MAX_COORD): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= max ? value : null;
 }
 
 function isPt(value: unknown): value is Pt {
-  return Array.isArray(value) && typeof value[0] === 'number' && typeof value[1] === 'number' &&
-    Number.isFinite(value[0]) && Number.isFinite(value[1]);
+  return Array.isArray(value) && value.length >= 2 && typeof value[0] === 'number' && typeof value[1] === 'number' &&
+    Number.isFinite(value[0]) && Number.isFinite(value[1]) &&
+    Math.abs(value[0]) <= MAX_COORD && Math.abs(value[1]) <= MAX_COORD;
+}
+
+function str(value: unknown, max: number): string | null {
+  return typeof value === 'string' && value.length <= max ? value : null;
+}
+
+function color(value: unknown): string {
+  return typeof value === 'string' && value.length <= 64 && COLOR_RE.test(value) ? value : '#1f2937';
+}
+
+function fillColor(value: unknown): string {
+  return typeof value === 'string' && value.length <= 64 && COLOR_RE.test(value) ? value : '';
 }
 
 export function sanitizeEl(raw: unknown): El | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const o = raw as Record<string, unknown>;
-  const id = typeof o.id === 'string' && o.id ? o.id : uid();
-  const color = typeof o.color === 'string' ? o.color : '#1f2937';
-  const stroke = typeof o.stroke === 'string' ? o.stroke : '#1f2937';
+  try {
+    if (!raw || typeof raw !== 'object') return null;
+    const o = raw as Record<string, unknown>;
+    const id = str(o.id, 64) || uid();
+    const stroke = color(o.stroke);
 
-  switch (o.type) {
-    case 'text': {
-      const x = num(o.x);
-      const y = num(o.y);
-      const w = num(o.w);
-      const h = num(o.h);
-      const fontSize = num(o.fontSize);
-      if (x === null || y === null || w === null || h === null || fontSize === null) return null;
-      return { id, type: 'text', x, y, w, h, text: typeof o.text === 'string' ? o.text : '', fontSize, color };
+    switch (o.type) {
+      case 'text': {
+        const x = num(o.x);
+        const y = num(o.y);
+        const w = num(o.w);
+        const h = num(o.h);
+        const fontSize = num(o.fontSize, 512);
+        if (x === null || y === null || w === null || h === null || fontSize === null || fontSize < 1) return null;
+        return {
+          id,
+          type: 'text',
+          x,
+          y,
+          w,
+          h,
+          text: str(o.text, MAX_TEXT) ?? '',
+          fontSize,
+          color: color(o.color)
+        };
+      }
+      case 'image': {
+        const x = num(o.x);
+        const y = num(o.y);
+        const w = num(o.w);
+        const h = num(o.h);
+        const src = str(o.src, MAX_SRC);
+        if (x === null || y === null || w === null || h === null) return null;
+        if (!src || !src.startsWith('data:image/')) return null;
+        return { id, type: 'image', x, y, w, h, src };
+      }
+      case 'ink': {
+        const x = num(o.x);
+        const y = num(o.y);
+        const w = num(o.w);
+        const h = num(o.h);
+        const width = num(o.width, 400);
+        if (x === null || y === null || w === null || h === null || width === null || width < 1) return null;
+        const points = Array.isArray(o.points) ? o.points.filter(isPt).slice(0, MAX_POINTS) : [];
+        if (!points.length) return null;
+        return {
+          id,
+          type: 'ink',
+          x,
+          y,
+          w,
+          h,
+          points,
+          color: color(o.color),
+          width,
+          highlight: o.highlight === true
+        };
+      }
+      case 'rect':
+      case 'ellipse': {
+        const x = num(o.x);
+        const y = num(o.y);
+        const w = num(o.w);
+        const h = num(o.h);
+        const strokeWidth = num(o.strokeWidth, 100);
+        if (x === null || y === null || w === null || h === null || strokeWidth === null || strokeWidth < 0.5) return null;
+        return { id, type: o.type, x, y, w, h, stroke, strokeWidth, fill: fillColor(o.fill) };
+      }
+      case 'arrow': {
+        const x1 = num(o.x1);
+        const y1 = num(o.y1);
+        const x2 = num(o.x2);
+        const y2 = num(o.y2);
+        const strokeWidth = num(o.strokeWidth, 100);
+        if (x1 === null || y1 === null || x2 === null || y2 === null || strokeWidth === null || strokeWidth < 0.5) return null;
+        return { id, type: 'arrow', x1, y1, x2, y2, stroke, strokeWidth, head: o.head !== false };
+      }
+      default:
+        return null;
     }
-    case 'image': {
-      const x = num(o.x);
-      const y = num(o.y);
-      const w = num(o.w);
-      const h = num(o.h);
-      if (x === null || y === null || w === null || h === null) return null;
-      if (typeof o.src !== 'string' || !o.src.startsWith('data:image/')) return null;
-      return { id, type: 'image', x, y, w, h, src: o.src };
-    }
-    case 'ink': {
-      const x = num(o.x);
-      const y = num(o.y);
-      const w = num(o.w);
-      const h = num(o.h);
-      const width = num(o.width);
-      if (x === null || y === null || w === null || h === null || width === null) return null;
-      const points = Array.isArray(o.points) ? o.points.filter(isPt) : [];
-      if (!points.length) return null;
-      return { id, type: 'ink', x, y, w, h, points, color, width };
-    }
-    case 'rect':
-    case 'ellipse': {
-      const x = num(o.x);
-      const y = num(o.y);
-      const w = num(o.w);
-      const h = num(o.h);
-      const strokeWidth = num(o.strokeWidth);
-      if (x === null || y === null || w === null || h === null || strokeWidth === null) return null;
-      return { id, type: o.type, x, y, w, h, stroke, strokeWidth };
-    }
-    case 'arrow': {
-      const x1 = num(o.x1);
-      const y1 = num(o.y1);
-      const x2 = num(o.x2);
-      const y2 = num(o.y2);
-      const strokeWidth = num(o.strokeWidth);
-      if (x1 === null || y1 === null || x2 === null || y2 === null || strokeWidth === null) return null;
-      return { id, type: 'arrow', x1, y1, x2, y2, stroke, strokeWidth };
-    }
-    default:
-      return null;
+  } catch {
+    return null;
   }
 }

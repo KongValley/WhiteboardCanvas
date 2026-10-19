@@ -9,10 +9,11 @@
 <body>
 <div id="topbar">
   <div id="title">未命名.wbc</div>
-  <div id="status"></div>
+  <div id="status"><span id="status-msg"></span><span id="status-info"></span></div>
   <div id="zoombar">
     <button id="zoom-out" title="缩小">−</button>
-    <span id="zoom-label">100%</span>
+    <input id="zoom-input" type="number" min="10" max="400" step="1" value="100" aria-label="缩放百分比">
+    <span class="zoom-unit">%</span>
     <button id="zoom-in" title="放大">+</button>
     <button id="zoom-fit">适应</button>
     <button id="help-btn" title="快捷键 (F1)">?</button>
@@ -20,6 +21,7 @@
 </div>
 <div id="viewport">
   <div id="world"><textarea id="editor" hidden></textarea></div>
+  <div id="guides"></div>
   <div id="selection" hidden></div>
   <div id="eraser-ring" hidden></div>
   <div id="hint">双击画布输入文字，或选择左侧工具开始</div>
@@ -27,43 +29,97 @@
 <div id="toolbar">
   <button data-tool="select" title="选择 (V)">选择</button>
   <button data-tool="pen" title="画笔 (P)">画笔</button>
+  <button data-tool="highlighter" title="荧光笔 (H)">荧光笔</button>
   <button data-tool="eraser" title="橡皮 (E)">橡皮</button>
   <button data-tool="text" title="文字 (T)">文字</button>
   <button data-tool="rect" title="矩形 (R)">矩形</button>
   <button data-tool="ellipse" title="椭圆 (O)">椭圆</button>
   <button data-tool="arrow" title="箭头 (A)">箭头</button>
+  <button data-tool="line" title="直线 (L)">直线</button>
   <button id="pick-image" title="插入图片 (I)">图片</button>
 </div>
 <div id="palette" hidden>
   <div class="row" data-row="color"></div>
+  <div class="row" data-row="fill" hidden></div>
   <div class="row" data-row="width"></div>
   <div class="row" data-row="size"></div>
 </div>
+<div id="minimap">
+  <button id="minimap-toggle" title="折叠/展开小地图" aria-expanded="true">−</button>
+  <div id="minimap-body">
+    <canvas id="minimap-canvas" width="180" height="120"></canvas>
+  </div>
+</div>
+<div id="context-menu" role="menu" hidden></div>
 <div id="help" hidden>
   <div class="help-panel" role="dialog" aria-modal="true" aria-label="快捷键">
     <h2>快捷键</h2>
     <dl>
-      <dt>V / P / E / T / R / O / A / I</dt><dd>选择 / 画笔 / 橡皮 / 文字 / 矩形 / 椭圆 / 箭头 / 图片</dd>
+      <dt>V / P / H / E / T / R / O / A / L / I</dt><dd>选择 / 画笔 / 荧光笔 / 橡皮 / 文字 / 矩形 / 椭圆 / 箭头 / 直线 / 图片</dd>
       <dt>双击 / Enter / F2</dt><dd>编辑文字</dd>
       <dt>Shift+点击</dt><dd>加选 / 取消选中</dd>
+      <dt>Tab / Shift+Tab</dt><dd>循环选中并滚入视口</dd>
       <dt>拖空白</dt><dd>框选（Shift 为追加）</dd>
       <dt>方向键 / Shift+方向键</dt><dd>微移 1px / 10px</dd>
       <dt>Ctrl+A</dt><dd>全选</dd>
       <dt>Ctrl+C / Ctrl+X / Ctrl+V</dt><dd>复制 / 剪切 / 粘贴</dd>
+      <dt>Ctrl+Shift+C</dt><dd>复制选区为透明 PNG</dd>
       <dt>Ctrl+D</dt><dd>再制</dd>
       <dt>Ctrl+] / Ctrl+[</dt><dd>置顶 / 置底</dd>
+      <dt>Ctrl+Shift+F</dt><dd>缩放到选中</dd>
       <dt>空格 / 中键 / 右键拖拽</dt><dd>平移画布</dd>
+      <dt>右键单击</dt><dd>上下文菜单</dd>
       <dt>滚轮 / Ctrl+滚轮</dt><dd>滚动 / 缩放</dd>
       <dt>Ctrl+0</dt><dd>缩放回 100%</dd>
+      <dt>移动 / 缩放 / 端点拖拽</dt><dd>吸附 24px 网格（按住 Alt 临时关闭）</dd>
       <dt>Delete / Backspace</dt><dd>删除选中</dd>
-      <dt>Ctrl+Z / Ctrl+Y</dt><dd>撤销 / 重做</dd>
+      <dt>Esc</dt><dd>结束当前工具回到选择</dd>
+      <dt>Ctrl+Z / Ctrl+Shift+Z</dt><dd>撤销 / 重做</dd>
       <dt>Ctrl+S / Ctrl+O / Ctrl+N / Ctrl+E</dt><dd>保存 / 打开 / 新建 / 导出 PNG</dd>
+      <dt>Ctrl+P</dt><dd>打印</dd>
       <dt>F1</dt><dd>显示或关闭本帮助</dd>
     </dl>
     <button id="help-close">关闭</button>
   </div>
 </div>
+<div id="settings" hidden>
+  <div class="help-panel settings-panel" role="dialog" aria-modal="true" aria-label="设置">
+    <h2>设置</h2>
+    <label class="setting-row">自动保存间隔（秒，0 为关闭）
+      <input id="set-autosave" type="number" min="0" max="60" step="1" value="1">
+    </label>
+    <label class="setting-row">关闭窗口时
+      <select id="set-close">
+        <option value="ask">询问是否保存</option>
+        <option value="save">自动保存</option>
+        <option value="discard">直接关闭</option>
+      </select>
+    </label>
+    <label class="setting-row setting-check">
+      <input id="set-gpu" type="checkbox"> 禁用硬件加速（重启生效）
+    </label>
+    <label class="setting-row">默认背景
+      <select id="set-background">
+        <option value="dots">点阵</option>
+        <option value="grid">网格</option>
+        <option value="plain">纯白</option>
+        <option value="cream">米色</option>
+      </select>
+    </label>
+    <div class="setting-row setting-assoc">
+      <span>.wbc 文件关联：<span id="assoc-state">未注册</span></span>
+      <button id="assoc-toggle">注册 .wbc 关联</button>
+    </div>
+    <div id="settings-status" class="settings-status"></div>
+    <div class="settings-actions">
+      <button id="settings-reset">恢复默认</button>
+      <button id="settings-save">保存</button>
+      <button id="settings-close">关闭</button>
+    </div>
+  </div>
+</div>
 <input id="file-input" type="file" accept="image/*" multiple hidden>
+<input id="image-replace-input" type="file" accept="image/*" hidden>
 <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

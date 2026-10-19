@@ -28,11 +28,13 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "build/icon.ico",
       "package.json",
       "LICENSE"
     ],
     "asar": true,
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "zip",

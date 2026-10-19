@@ -14,6 +14,31 @@ export interface SaveResult {
   error?: string;
 }
 
+export interface Settings {
+  autosaveDelay: number;
+  closeBehavior: 'ask' | 'save' | 'discard';
+  disableGpu: boolean;
+  background: 'dots' | 'grid' | 'plain' | 'cream';
+}
+
+export interface RecoveryData {
+  text: string;
+  path: string | null;
+}
+
+export interface StartupResult {
+  settings: Settings;
+  recovery: RecoveryData | null;
+  openPath: string | null;
+}
+
+export interface AssociationState {
+  supported: boolean;
+  enabled: boolean;
+  ok?: boolean;
+  error?: string;
+}
+
 export interface ElementInfo {
   id: string;
   type: ElType;
@@ -26,19 +51,37 @@ export interface ElementInfo {
   width?: number;
   stroke?: string;
   strokeWidth?: number;
+  fill?: string;
+  head?: boolean;
+  highlight?: boolean;
 }
 
 export interface Api {
+  startup(): Promise<StartupResult>;
   openDoc(path?: string): Promise<OpenResult>;
   saveDoc(path: string | null, text: string, silent?: boolean): Promise<SaveResult>;
   savePng(dataUrl: string, path?: string): Promise<SaveResult>;
+  printPng(dataUrl: string, mode: 'pdf' | 'print', target?: string): Promise<SaveResult>;
   showError(message: string): void;
+  log(level: 'info' | 'warn' | 'error', message: string): void;
+  confirm(message: string, detail?: string): Promise<boolean>;
   writeClipboardText(text: string): void;
+  writeClipboardImage(dataUrl: string): void;
+  readClipboardText(): Promise<string>;
   confirmDiscard(): Promise<boolean>;
   setDirty(dirty: boolean): void;
-  onMenu(cb: (action: string) => void): void;
+  getSettings(): Promise<Settings>;
+  setSettings(patch: Partial<Settings>): Promise<Settings | { error: string }>;
+  writeRecovery(text: string, path: string): void;
+  clearRecovery(): void;
+  backupNow(text: string, path: string | null): Promise<{ path?: string; error?: string }>;
+  restoreBackup(): Promise<{ path?: string; canceled?: boolean; error?: string }>;
+  getAssociation(): Promise<AssociationState>;
+  setAssociation(enabled: boolean): Promise<AssociationState>;
+  onMenu(cb: (action: string, arg?: string) => void): void;
   onRequestSave(cb: () => void): void;
   saveResult(ok: boolean): void;
+  versions: { app: string; electron: string; chrome: string };
 }
 
 export interface TestApi {
@@ -53,8 +96,8 @@ export interface TestApi {
   sendToBack(): void;
   clipboardJson(): string;
   addText(text: string, x: number, y: number): string;
-  addInk(points: [number, number][], color: string, width: number): string;
-  addShape(type: 'rect' | 'ellipse' | 'arrow', x: number, y: number, w: number, h: number): string;
+  addInk(points: [number, number][], color: string, width: number, highlight?: boolean): string;
+  addShape(type: 'rect' | 'ellipse' | 'arrow' | 'line', x: number, y: number, w: number, h: number): string;
   addImage(dataUrl: string, x: number, y: number): Promise<string | null>;
   hitTest(x: number, y: number): ElType | null;
   move(id: string, dx: number, dy: number): void;
@@ -64,7 +107,23 @@ export interface TestApi {
   saveTo(path: string): Promise<boolean>;
   openFrom(path: string): Promise<boolean>;
   exportPngTo(path: string): Promise<boolean>;
-  pngData(): Promise<string | null>;
+  pngData(opts?: { selection?: boolean; background?: boolean }): Promise<string | null>;
+  setFill(id: string, fill: string): void;
+  eraseAt(x: number, y: number): number;
+  el(id: string): unknown;
+  setEndpoints(id: string, x1: number, y1: number, x2: number, y2: number): void;
+  zoomPercent(): number;
+  fitSelection(): void;
+  selectAll(): void;
+  statusInfo(): string;
+  copySelectionPng(): Promise<boolean>;
+  exportSelectionPngTo(path: string): Promise<boolean>;
+  replaceImage(id: string, dataUrl: string): Promise<boolean>;
+  imageFit(id: string, mode: 'original' | 'fit-width'): void;
+  gridSnapEnabled(): boolean;
+  setView(zoom: number, panX: number, panY: number): void;
+  mountedCount(): number;
+  printPdfTo(path: string): Promise<boolean>;
 }
 
 declare global {
