@@ -1,7 +1,7 @@
 {
   "name": "whiteboard-canvas",
   "productName": "WhiteboardCanvas",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Win7 32-bit whiteboard canvas",
   "license": "GPL-3.0-or-later",
