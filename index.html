@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>白板画布</title>
+</head>
+<body>
+<div id="topbar">
+  <div id="title">未命名.wbc</div>
+  <div id="status"></div>
+  <div id="zoombar">
+    <button id="zoom-out" title="缩小">−</button>
+    <span id="zoom-label">100%</span>
+    <button id="zoom-in" title="放大">+</button>
+    <button id="zoom-fit">适应</button>
+    <button id="help-btn" title="快捷键 (F1)">?</button>
+  </div>
+</div>
+<div id="viewport">
+  <div id="world"><textarea id="editor" hidden></textarea></div>
+  <div id="selection" hidden></div>
+  <div id="eraser-ring" hidden></div>
+  <div id="hint">双击画布输入文字，或选择左侧工具开始</div>
+</div>
+<div id="toolbar">
+  <button data-tool="select" title="选择 (V)">选择</button>
+  <button data-tool="pen" title="画笔 (P)">画笔</button>
+  <button data-tool="eraser" title="橡皮 (E)">橡皮</button>
+  <button data-tool="text" title="文字 (T)">文字</button>
+  <button data-tool="rect" title="矩形 (R)">矩形</button>
+  <button data-tool="ellipse" title="椭圆 (O)">椭圆</button>
+  <button data-tool="arrow" title="箭头 (A)">箭头</button>
+  <button id="pick-image" title="插入图片 (I)">图片</button>
+</div>
+<div id="palette" hidden>
+  <div class="row" data-row="color"></div>
+  <div class="row" data-row="width"></div>
+  <div class="row" data-row="size"></div>
+</div>
+<div id="help" hidden>
+  <div class="help-panel" role="dialog" aria-modal="true" aria-label="快捷键">
+    <h2>快捷键</h2>
+    <dl>
+      <dt>V / P / E / T / R / O / A / I</dt><dd>选择 / 画笔 / 橡皮 / 文字 / 矩形 / 椭圆 / 箭头 / 图片</dd>
+      <dt>双击 / Enter / F2</dt><dd>编辑文字</dd>
+      <dt>Shift+点击</dt><dd>加选 / 取消选中</dd>
+      <dt>拖空白</dt><dd>框选（Shift 为追加）</dd>
+      <dt>方向键 / Shift+方向键</dt><dd>微移 1px / 10px</dd>
+      <dt>Ctrl+A</dt><dd>全选</dd>
+      <dt>Ctrl+C / Ctrl+X / Ctrl+V</dt><dd>复制 / 剪切 / 粘贴</dd>
+      <dt>Ctrl+D</dt><dd>再制</dd>
+      <dt>Ctrl+] / Ctrl+[</dt><dd>置顶 / 置底</dd>
+      <dt>空格 / 中键 / 右键拖拽</dt><dd>平移画布</dd>
+      <dt>滚轮 / Ctrl+滚轮</dt><dd>滚动 / 缩放</dd>
+      <dt>Ctrl+0</dt><dd>缩放回 100%</dd>
+      <dt>Delete / Backspace</dt><dd>删除选中</dd>
+      <dt>Ctrl+Z / Ctrl+Y</dt><dd>撤销 / 重做</dd>
+      <dt>Ctrl+S / Ctrl+O / Ctrl+N / Ctrl+E</dt><dd>保存 / 打开 / 新建 / 导出 PNG</dd>
+      <dt>F1</dt><dd>显示或关闭本帮助</dd>
+    </dl>
+    <button id="help-close">关闭</button>
+  </div>
+</div>
+<input id="file-input" type="file" accept="image/*" multiple hidden>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -1,0 +1,52 @@
+{
+  "name": "whiteboard-canvas",
+  "productName": "WhiteboardCanvas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Win7 32-bit whiteboard canvas",
+  "license": "GPL-3.0-or-later",
+  "main": "electron/main.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "start": "npm run build && electron .",
+    "smoke": "npm run build && electron . --smoke",
+    "dist": "npm run build && electron-builder --win zip --ia32"
+  },
+  "devDependencies": {
+    "electron": "22.3.27",
+    "electron-builder": "26.15.3",
+    "typescript": "5.9.3",
+    "vite": "6.3.5"
+  },
+  "build": {
+    "appId": "com.kongvalley.whiteboard",
+    "productName": "WhiteboardCanvas",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json",
+      "LICENSE"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "ia32"
+          ]
+        }
+      ],
+      "artifactName": "whiteboard-canvas-${version}-ia32.zip"
+    }
+  },
+  "allowScripts": {
+    "electron@22.3.27": true,
+    "esbuild@0.25.12": true,
+    "electron-winstaller@5.4.0": true
+  }
+}
