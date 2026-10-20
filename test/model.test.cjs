@@ -2,6 +2,27 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const model = require('../test-dist/src/model.js');
 
+test('incremental ink path matches the full rebuild', () => {
+  const points = [];
+  for (let i = 0; i < 60; i++) points.push([Math.sin(i / 3) * 50, i * 1.7]);
+  const builder = new model.InkPathBuilder([points[0]]);
+  for (let i = 1; i < points.length; i++) builder.push(points[i]);
+  assert.equal(builder.value, model.smoothPathD(points));
+  // 从中间状态恢复也应一致
+  const half = new model.InkPathBuilder(points.slice(0, 20));
+  assert.equal(half.value, model.smoothPathD(points.slice(0, 20)));
+});
+
+test('incremental ink path handles empty and single point', () => {
+  const empty = new model.InkPathBuilder([]);
+  assert.equal(empty.value, '');
+  const one = new model.InkPathBuilder([[3, 4]]);
+  assert.equal(one.value, model.smoothPathD([[3, 4]]));
+  const fresh = new model.InkPathBuilder();
+  assert.equal(fresh.push([1, 2]), model.smoothPathD([[1, 2]]));
+  assert.equal(fresh.push([3, 4]), model.smoothPathD([[1, 2], [3, 4]]));
+});
+
 test('bounds and visual bounds with rotation', () => {
   const rect = { id: 'r', type: 'rect', x: 0, y: 0, w: 10, h: 20, stroke: '#000', strokeWidth: 1, fill: '' };
   assert.deepEqual(model.bounds(rect), { x: 0, y: 0, w: 10, h: 20 });
@@ -10,6 +31,15 @@ test('bounds and visual bounds with rotation', () => {
   assert.ok(Math.abs(visual.w - 20) < 1e-6, 'width swaps after 90deg');
   assert.ok(Math.abs(visual.h - 10) < 1e-6, 'height swaps after 90deg');
   assert.ok(Math.abs(visual.x + 5) < 1e-6);
+});
+
+test('visible and auto-selectable helpers skip hidden/locked', () => {
+  const visible = { id: 'v', type: 'rect', x: 0, y: 0, w: 10, h: 10, stroke: '#000', strokeWidth: 1, fill: '' };
+  const hidden = { ...visible, id: 'h', hidden: true };
+  const locked = { ...visible, id: 'l', locked: true };
+  const both = { ...visible, id: 'b', hidden: true, locked: true };
+  assert.deepEqual(model.visibleElements([visible, hidden, locked, both]).map((el) => el.id), ['v', 'l']);
+  assert.deepEqual(model.autoSelectableElements([visible, hidden, locked, both]).map((el) => el.id), ['v']);
 });
 
 test('hit test respects hidden/locked options and rotation', () => {
@@ -41,7 +71,7 @@ test('normalizeInk and smooth path', () => {
 
 test('sanitizeEl rejects oversized or invalid input', () => {
   assert.equal(model.sanitizeEl({ type: 'image', x: 0, y: 0, w: 1, h: 1, src: 'javascript:alert(1)' }), null);
-  assert.equal(model.sanitizeEl({ type: 'poly', kind: 'hexagon', x: 0, y: 0, w: 1, h: 1, strokeWidth: 1 }), null);
+  assert.equal(model.sanitizeEl({ type: 'poly', kind: 'octagon', x: 0, y: 0, w: 1, h: 1, strokeWidth: 1 }), null);
   const text = model.sanitizeEl({ type: 'text', x: 0, y: 0, w: 10, h: 10, text: 'a'.repeat(200001), fontSize: 12 });
   assert.equal(text.text.length, 0);
   const rotated = model.sanitizeEl({ type: 'rect', x: 0, y: 0, w: 10, h: 10, strokeWidth: 2, rotation: 9999 });

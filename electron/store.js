@@ -12,10 +12,14 @@ const DEFAULT_SETTINGS = {
   autosaveDelay: 1,
   closeBehavior: 'ask',
   disableGpu: false,
+  lowSpec: false,
   background: 'dots',
+  gridSize: 24,
   theme: 'light',
   language: 'zh',
   exportBackground: true,
+  printOrientation: 'landscape',
+  printPageSize: 'A4',
   template: 'blank',
   shortcuts: {}
 };
@@ -43,18 +47,26 @@ function validateSettings(raw) {
   out.autosaveDelay = clampInt(raw.autosaveDelay, 0, 60, DEFAULT_SETTINGS.autosaveDelay);
   out.closeBehavior = ['ask', 'save', 'discard'].includes(raw.closeBehavior) ? raw.closeBehavior : DEFAULT_SETTINGS.closeBehavior;
   out.disableGpu = raw.disableGpu === true;
+  out.lowSpec = raw.lowSpec === true;
   out.background = ['dots', 'grid', 'plain', 'cream'].includes(raw.background) ? raw.background : DEFAULT_SETTINGS.background;
+  out.gridSize = [8, 16, 24, 32].includes(Number(raw.gridSize)) ? Number(raw.gridSize) : DEFAULT_SETTINGS.gridSize;
   out.theme = raw.theme === 'dark' ? 'dark' : 'light';
   out.language = raw.language === 'en' ? 'en' : 'zh';
   out.exportBackground = raw.exportBackground !== false;
+  out.printOrientation = raw.printOrientation === 'portrait' ? 'portrait' : 'landscape';
+  out.printPageSize = raw.printPageSize === 'Letter' ? 'Letter' : 'A4';
   out.template = typeof raw.template === 'string' ? raw.template.slice(0, 32) : 'blank';
   out.shortcuts = cleanShortcuts(raw.shortcuts);
   return out;
 }
 
-function timestamp(date) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+function timestamp(now = Date.now()) {
+  const date = new Date(now);
+  const p = (n, width = 2) => String(n).padStart(width, '0');
+  return (
+    `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-` +
+    `${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}-${p(date.getMilliseconds(), 3)}`
+  );
 }
 
 function safeBaseName(filePath) {
@@ -63,16 +75,27 @@ function safeBaseName(filePath) {
   return base.replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || '未命名';
 }
 
+function safeKey(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : null;
+}
+
+function shortKey(value) {
+  const key = safeKey(value);
+  return key ? key.slice(-10) : '';
+}
+
 function createStore(userData) {
   const logsDir = path.join(userData, 'logs');
   const backupsDir = path.join(userData, 'backups');
+  const recoveryDir = path.join(userData, 'recovery');
   const logFile = path.join(logsDir, 'main.log');
   const settingsFile = path.join(userData, 'settings.json');
   const recentFile = path.join(userData, 'recent.json');
   const sessionFile = path.join(userData, 'session.json');
-  const recoveryFile = path.join(userData, 'recovery.wbc');
-  const recoveryMetaFile = path.join(userData, 'recovery.json');
-  for (const dir of [logsDir, backupsDir]) fs.mkdirSync(dir, { recursive: true });
+  // 旧版单份快照，首次启动时迁移为按窗口/文档分文件
+  const legacyRecoveryFile = path.join(userData, 'recovery.wbc');
+  const legacyRecoveryMetaFile = path.join(userData, 'recovery.json');
+  for (const dir of [logsDir, backupsDir, recoveryDir]) fs.mkdirSync(dir, { recursive: true });
 
   function readJson(file, fallback) {
     try {
@@ -167,9 +190,13 @@ function createStore(userData) {
 
   function pruneBackups(base) {
     try {
+      const prefix = base + '-';
       const files = fs
         .readdirSync(backupsDir)
-        .filter((name) => name.startsWith(base + '-') && /\.wbc$/i.test(name))
+        .filter(
+          (name) =>
+            name.startsWith(prefix) && /^\d{8}-\d{6}(?:-\d{3})?(?:-\d+)?\.wbc$/i.test(name.slice(prefix.length))
+        )
         .map((name) => ({ name, time: fs.statSync(path.join(backupsDir, name)).mtimeMs }))
         .sort((a, b) => b.time - a.time);
       for (const stale of files.slice(BACKUP_LIMIT)) {
@@ -184,30 +211,58 @@ function createStore(userData) {
     }
   }
 
-  async function backupBuffer(buf, filePath) {
-    try {
-      const base = safeBaseName(filePath);
-      const file = path.join(backupsDir, `${base}-${timestamp(new Date())}.wbc`);
-      await fs.promises.writeFile(file, buf);
-      pruneBackups(base);
-      return file;
-    } catch (err) {
-      log('warn', '自动备份失败：' + err.message);
-      return null;
+  let backupSequence = 0;
+  function backupBase(filePath, docKey) {
+    const base = safeBaseName(filePath);
+    // 未命名文档没有路径，用窗口/文档键隔离，避免多个未命名窗口互相覆盖
+    return filePath ? base : `${base}-${shortKey(docKey) || 'unknown'}`;
+  }
+
+  function nextBackupName(base) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const sequence = backupSequence++;
+      const file = path.join(backupsDir, `${base}-${timestamp()}${sequence ? '-' + sequence : ''}.wbc`);
+      if (!fs.existsSync(file)) return file;
     }
+    return null;
+  }
+
+  async function backupBuffer(buf, filePath, docKey) {
+    const base = backupBase(filePath, docKey);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const file = nextBackupName(base);
+      if (!file) break;
+      try {
+        await fs.promises.writeFile(file, buf, { flag: 'wx' });
+        pruneBackups(base);
+        return file;
+      } catch (err) {
+        if (err && err.code === 'EEXIST') continue;
+        log('warn', '自动备份失败：' + err.message);
+        return null;
+      }
+    }
+    log('warn', '自动备份失败：无法生成唯一文件名');
+    return null;
   }
 
   async function backupFile(filePath) {
-    try {
-      const base = safeBaseName(filePath);
-      const file = path.join(backupsDir, `${base}-${timestamp(new Date())}.wbc`);
-      await fs.promises.copyFile(filePath, file);
-      pruneBackups(base);
-      return file;
-    } catch (err) {
-      log('warn', '自动备份失败：' + err.message);
-      return null;
+    const base = backupBase(filePath, null);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const file = nextBackupName(base);
+      if (!file) break;
+      try {
+        await fs.promises.copyFile(filePath, file, fs.constants.COPYFILE_EXCL);
+        pruneBackups(base);
+        return file;
+      } catch (err) {
+        if (err && err.code === 'EEXIST') continue;
+        log('warn', '自动备份失败：' + err.message);
+        return null;
+      }
     }
+    log('warn', '自动备份失败：无法生成唯一文件名');
+    return null;
   }
 
   function listBackups() {
@@ -226,43 +281,78 @@ function createStore(userData) {
     }
   }
 
-  // 恢复快照异步写，只保留最新一份，避免大文档阻塞主进程。
-  let recoveryPending = null;
+  // 恢复快照按窗口/文档键异步写，避免多窗口互相覆盖，也避免大文档阻塞主进程。
+  const recoveryPending = new Map();
+  const recoveryGeneration = new Map();
   let recoveryRunning = false;
-  let recoveryGeneration = 0;
+  let recoveryFlushPromise = null;
 
-  async function flushRecovery() {
-    while (recoveryPending) {
-      const job = recoveryPending;
-      recoveryPending = null;
-      try {
-        const tmp = recoveryFile + '.tmp';
-        await fs.promises.writeFile(tmp, job.text, 'utf8');
-        if (job.generation !== recoveryGeneration) {
-          await fs.promises.unlink(tmp).catch(() => {});
-          continue;
-        }
-        await fs.promises.rename(tmp, recoveryFile);
-        await fs.promises.writeFile(recoveryMetaFile, JSON.stringify({ path: job.path, at: Date.now() }), 'utf8');
-      } catch (err) {
-        log('warn', '写恢复快照失败：' + err.message);
-      }
-      if (job.generation !== recoveryGeneration) {
-        for (const file of [recoveryFile, recoveryMetaFile]) {
-          await fs.promises.unlink(file).catch(() => {});
-        }
-      }
-    }
-    recoveryRunning = false;
+  function recoveryPaths(key) {
+    return {
+      text: path.join(recoveryDir, key + '.json'),
+      meta: path.join(recoveryDir, key + '.meta.json')
+    };
   }
 
-  function writeRecovery(text, filePath) {
-    if (typeof text !== 'string' || text.length > RECOVERY_TEXT_MAX) return false;
-    recoveryPending = {
+  function generationOf(key) {
+    return recoveryGeneration.get(key) || 0;
+  }
+
+  function bumpGeneration(key) {
+    recoveryGeneration.set(key, generationOf(key) + 1);
+  }
+
+  function flushRecovery() {
+    if (recoveryFlushPromise) return recoveryFlushPromise;
+    recoveryFlushPromise = (async () => {
+      while (recoveryPending.size) {
+        const batch = Array.from(recoveryPending.entries());
+        recoveryPending.clear();
+        for (const [key, job] of batch) {
+          const files = recoveryPaths(key);
+          const tmp = files.text + '.tmp';
+          try {
+            await fs.promises.writeFile(tmp, job.text, 'utf8');
+            if (job.generation !== generationOf(key)) {
+              await fs.promises.unlink(tmp).catch(() => {});
+              continue;
+            }
+            await fs.promises.rename(tmp, files.text);
+            if (job.generation !== generationOf(key)) {
+              await fs.promises.unlink(files.text).catch(() => {});
+              await fs.promises.unlink(files.meta).catch(() => {});
+              continue;
+            }
+            await fs.promises.writeFile(
+              files.meta,
+              JSON.stringify({ path: job.path, stamp: job.stamp || null, at: Date.now() }),
+              'utf8'
+            );
+          } catch (err) {
+            log('warn', '写恢复快照失败：' + err.message);
+          }
+        }
+      }
+    })().finally(() => {
+      recoveryFlushPromise = null;
+      if (recoveryPending.size) void flushRecovery();
+      else recoveryRunning = false;
+    });
+    return recoveryFlushPromise;
+  }
+
+  function writeRecovery(key, text, filePath, stamp) {
+    const safe = safeKey(key);
+    if (!safe || typeof text !== 'string' || text.length > RECOVERY_TEXT_MAX) return false;
+    recoveryPending.set(safe, {
       text,
       path: typeof filePath === 'string' && filePath ? filePath : null,
-      generation: recoveryGeneration
-    };
+      stamp:
+        stamp && typeof stamp.mtimeMs === 'number' && typeof stamp.size === 'number'
+          ? { mtimeMs: stamp.mtimeMs, size: stamp.size }
+          : null,
+      generation: generationOf(safe)
+    });
     if (!recoveryRunning) {
       recoveryRunning = true;
       void flushRecovery();
@@ -270,30 +360,111 @@ function createStore(userData) {
     return true;
   }
 
-  function readRecovery() {
+  function readRecovery(key) {
+    const safe = safeKey(key);
+    if (!safe) return null;
+    const files = recoveryPaths(safe);
     try {
-      const text = fs.readFileSync(recoveryFile, 'utf8');
-      const meta = readJson(recoveryMetaFile, {});
-      return { text, path: typeof meta.path === 'string' && meta.path ? meta.path : null };
+      const text = fs.readFileSync(files.text, 'utf8');
+      const meta = readJson(files.meta, {});
+      return {
+        key: safe,
+        text,
+        path: typeof meta.path === 'string' && meta.path ? meta.path : null,
+        stamp:
+          meta.stamp && typeof meta.stamp.mtimeMs === 'number' && typeof meta.stamp.size === 'number'
+            ? { mtimeMs: meta.stamp.mtimeMs, size: meta.stamp.size }
+            : null,
+        at: typeof meta.at === 'number' ? meta.at : 0
+      };
     } catch {
       return null;
     }
   }
 
-  function clearRecovery() {
-    recoveryGeneration += 1;
-    recoveryPending = null;
-    for (const file of [recoveryFile, recoveryMetaFile]) {
+  function listRecoveries() {
+    migrateLegacyRecovery();
+    const out = [];
+    let names = [];
+    try {
+      names = fs.readdirSync(recoveryDir);
+    } catch {
+      return out;
+    }
+    for (const name of names) {
+      if (!name.endsWith('.meta.json')) continue;
+      const key = name.slice(0, -'.meta.json'.length);
+      const safe = safeKey(key);
+      if (!safe) continue;
+      const files = recoveryPaths(safe);
+      try {
+        const stat = fs.statSync(files.text);
+        const meta = readJson(files.meta, {});
+        out.push({
+          key: safe,
+          path: typeof meta.path === 'string' && meta.path ? meta.path : null,
+          stamp:
+            meta.stamp && typeof meta.stamp.mtimeMs === 'number' && typeof meta.stamp.size === 'number'
+              ? { mtimeMs: meta.stamp.mtimeMs, size: meta.stamp.size }
+              : null,
+          at: typeof meta.at === 'number' ? meta.at : stat.mtimeMs,
+          size: stat.size
+        });
+      } catch {
+        /* 快照文件缺失 */
+      }
+    }
+    return out.sort((a, b) => b.at - a.at);
+  }
+
+  function clearRecovery(key) {
+    const safe = safeKey(key);
+    if (!safe) return false;
+    bumpGeneration(safe);
+    recoveryPending.delete(safe);
+    const files = recoveryPaths(safe);
+    for (const file of [files.text, files.meta]) {
       try {
         fs.unlinkSync(file);
       } catch {
         /* 不存在 */
       }
     }
+    return true;
+  }
+
+  function migrateLegacyRecovery() {
+    if (!fs.existsSync(legacyRecoveryFile)) return;
+    const key = 'legacy-' + Date.now().toString(36);
+    try {
+      const text = fs.readFileSync(legacyRecoveryFile, 'utf8');
+      const meta = readJson(legacyRecoveryMetaFile, {});
+      const files = recoveryPaths(key);
+      fs.writeFileSync(files.text, text, 'utf8');
+      fs.writeFileSync(
+        files.meta,
+        JSON.stringify({
+          path: typeof meta.path === 'string' ? meta.path : null,
+          stamp: null,
+          at: typeof meta.at === 'number' ? meta.at : Date.now()
+        }),
+        'utf8'
+      );
+      for (const file of [legacyRecoveryFile, legacyRecoveryMetaFile]) {
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          /* 忽略 */
+        }
+      }
+      log('info', '已迁移旧版恢复快照：' + key);
+    } catch (err) {
+      log('warn', '迁移旧版恢复快照失败：' + err.message);
+    }
   }
 
   return {
-    dirs: { userData, logsDir, backupsDir },
+    dirs: { userData, logsDir, backupsDir, recoveryDir },
     log,
     loadSettings,
     saveSettings,
@@ -307,7 +478,9 @@ function createStore(userData) {
     listBackups,
     writeRecovery,
     readRecovery,
-    clearRecovery
+    listRecoveries,
+    clearRecovery,
+    flushRecovery
   };
 }
 

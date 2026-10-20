@@ -77,6 +77,7 @@ async function launch(options = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wbc-e2e-'));
   const port = 9400 + Math.floor(Math.random() * 400);
   const args = ['--e2e', '--remote-debugging-port=' + port, '--user-data-dir=' + path.join(tmp, 'chromium')];
+  if (options.extraArgs) args.push(...options.extraArgs);
   const child = spawn(exe, args, { cwd: repo, stdio: 'ignore', windowsHide: true });
   let page = null;
   for (let i = 0; i < 150; i++) {
@@ -126,6 +127,9 @@ async function launch(options = {}) {
     send: client.send,
     tmp,
     exe,
+    port,
+    pageUrl: page.url,
+    pageId: page.id,
     close: async () => {
       try {
         client.send('Browser.close').catch(() => {});
@@ -150,4 +154,4 @@ async function launch(options = {}) {
   };
 }
 
-module.exports = { launch, repo, sleep };
+module.exports = { launch, repo, sleep, connect };

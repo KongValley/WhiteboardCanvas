@@ -31,17 +31,23 @@ async function main() {
     const pan = await app.eval(
       '(()=>{const t=performance.now();for(let i=0;i<200;i++){__test.setView(1,-i*5,-i*2);}return performance.now()-t;})()'
     );
+    // 拖拽 20 帧（真实拖拽路径：单次历史克隆 + 每帧增量更新）
+    await app.eval('__test.selectAll()');
+    const drag = await app.eval('__test.dragBench(20, 1)');
     const exportPng = await app.eval(
       '(async()=>{const t=performance.now();const data=await __test.pngData({selection:false});return {ms:performance.now()-t,bytes:data?data.length:0};})()'
     );
+    const heap = await app.send('Runtime.getHeapUsage').catch(() => null);
     const result = {
       when: new Date().toISOString(),
+      memoryMB: heap ? Math.round(heap.usedSize / 1024 / 1024) : null,
       machine: process.platform + '-' + process.arch,
       elements: total,
       created: created.ms,
       saveMs: save.ms,
       openMs: open.ms,
       pan200Ms: pan,
+      dragMs: drag.ms,
       exportMs: exportPng.ms,
       exportBytes: exportPng.bytes
     };
@@ -60,6 +66,12 @@ async function main() {
       const limit = (baseline[key] || 1) * 2.5;
       const ok = result[key] <= limit;
       console.log((ok ? 'PASS ' : 'FAIL ') + key + ' ' + result[key].toFixed(1) + 'ms (baseline ' + Number(baseline[key]).toFixed(1) + 'ms)');
+      if (!ok) regressions++;
+    }
+    if (typeof baseline.dragMs === 'number') {
+      const limit = baseline.dragMs * 2.5;
+      const ok = result.dragMs <= limit;
+      console.log((ok ? 'PASS ' : 'FAIL ') + 'dragMs ' + result.dragMs.toFixed(1) + 'ms (baseline ' + Number(baseline.dragMs).toFixed(1) + 'ms)');
       if (!ok) regressions++;
     }
     console.log('BENCH ' + (regressions === 0 ? 'PASS' : 'FAIL'));

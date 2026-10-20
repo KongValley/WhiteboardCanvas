@@ -15,7 +15,17 @@ export function updateStatusInfo(): void {
   const total = state.doc.elements.length;
   const selected = state.selectedIds.length;
   const coords = pointer ? `${Math.round(pointer[0])}, ${Math.round(pointer[1])}` : '—, —';
-  const save = state.dirty ? t('status.unsaved') : t('status.saved');
+  const save = state.readOnly
+    ? t('status.readonly')
+    : state.saveStatus === 'saving'
+      ? t('status.saving')
+      : state.saveStatus === 'conflict'
+        ? t('status.conflict')
+        : state.saveStatus === 'error'
+          ? t('status.saveError')
+          : state.dirty
+            ? t('status.unsaved')
+            : t('status.saved');
   let auto = '—';
   if (state.autosaveAt) {
     const d = new Date(state.autosaveAt);

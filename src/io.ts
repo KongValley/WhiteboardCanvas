@@ -9,10 +9,13 @@ import {
   arrowHeadPathD,
   arrowPathD,
   arrowShaftD,
+  bounds,
   boundsUnion,
   centerOf,
+  cloneEl,
   dashArray,
   inkAbsolutePoints,
+  listLines,
   moveEl,
   polyPathD,
   rectPathD,
@@ -31,17 +34,71 @@ import {
   markSaved,
   resetDoc,
   serialize,
+  setSaveStatus,
   setStatus,
   state,
+  syncActivePage,
   updateTitle
 } from './state';
 import { FONT, renderAll } from './render';
 import { applyTransform, fitToContent, screenToWorld, view, viewport, viewportCenter } from './view';
+import { openForm } from './dialogs';
+import type { FileStamp, OpenResult } from './types';
+
+const progressEl = document.getElementById('progress') as HTMLDivElement;
+const progressText = document.getElementById('progress-text') as HTMLSpanElement;
+const progressCancel = document.getElementById('progress-cancel') as HTMLButtonElement;
+let progressToken = 0;
+let progressCancelled = false;
+
+function beginProgress(label: string): number {
+  progressToken += 1;
+  progressCancelled = false;
+  progressText.textContent = label;
+  progressEl.hidden = false;
+  return progressToken;
+}
+
+function updateProgress(label: string): void {
+  progressText.textContent = label;
+}
+
+function progressAborted(token: number): boolean {
+  return progressCancelled || token !== progressToken;
+}
+
+function endProgress(token: number): void {
+  if (token === progressToken) progressEl.hidden = true;
+}
+
+progressCancel.addEventListener('click', () => {
+  progressCancelled = true;
+  progressText.textContent = '正在取消…';
+});
 
 const CLIP_APP = 'whiteboard-canvas-elements';
 const BIG_IMAGE = 50 * 1024 * 1024;
 const MAX_TEXT = 200000;
-const imageCache = new Map<string, HTMLImageElement>();
+const IMAGE_CACHE_BYTES = 128 * 1024 * 1024;
+const imageCache = new Map<string, { img: HTMLImageElement; bytes: number }>();
+let imageCacheBytes = 0;
+let lastRenderScale = 1;
+
+function touchImageCache(src: string, img: HTMLImageElement): void {
+  const bytes = Math.max(1, img.naturalWidth * img.naturalHeight * 4);
+  const old = imageCache.get(src);
+  if (old) imageCacheBytes -= old.bytes;
+  imageCache.delete(src);
+  imageCache.set(src, { img, bytes });
+  imageCacheBytes += bytes;
+  while (imageCacheBytes > IMAGE_CACHE_BYTES && imageCache.size > 1) {
+    const first = imageCache.keys().next().value as string | undefined;
+    if (first === undefined) break;
+    const entry = imageCache.get(first);
+    if (entry) imageCacheBytes -= entry.bytes;
+    imageCache.delete(first);
+  }
+}
 let lastPointerWorld: Pt | null = null;
 let commitEditHook: () => void = () => {};
 let cancelEditHook: () => void = () => {};
@@ -75,11 +132,15 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 function loadImage(src: string): Promise<HTMLImageElement> {
   const cached = imageCache.get(src);
-  if (cached && cached.complete) return Promise.resolve(cached);
+  if (cached && cached.img.complete) {
+    imageCache.delete(src);
+    imageCache.set(src, cached);
+    return Promise.resolve(cached.img);
+  }
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      imageCache.set(src, img);
+      touchImageCache(src, img);
       resolve(img);
     };
     img.onerror = () => reject(new Error('图片加载失败'));
@@ -98,22 +159,42 @@ export async function prepareImageFile(file: File): Promise<{ src: string; w: nu
     const size = await imageSize(raw);
     if (!size || !size.w || !size.h) return null;
     const maxSide = Math.max(size.w, size.h);
-    if (maxSide <= 1600) return { src: raw, w: size.w, h: size.h };
-    const scale = 1600 / maxSide;
+    // 小图/普通截图保留原始编码，避免把 JPEG 照片重编码成体积更大的 PNG
+    if (maxSide <= 2000 && file.size <= 4 * 1024 * 1024) return { src: raw, w: size.w, h: size.h };
+    const scale = 2000 / maxSide;
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(size.w * scale));
     canvas.height = Math.max(1, Math.round(size.h * scale));
     const ctx = canvas.getContext('2d');
     if (!ctx) return { src: raw, w: size.w, h: size.h };
     ctx.drawImage(await loadImage(raw), 0, 0, canvas.width, canvas.height);
-    return { src: canvas.toDataURL('image/png'), w: canvas.width, h: canvas.height };
+    const png = /^data:image\/png/i.test(raw) || /png$/i.test(file.type);
+    return {
+      src: canvas.toDataURL(png ? 'image/png' : 'image/jpeg', png ? undefined : 0.88),
+      w: canvas.width,
+      h: canvas.height
+    };
   } catch {
     return null;
   }
 }
 
 export async function insertImage(file: File, at: Pt): Promise<string | null> {
-  const prepared = await prepareImageFile(file);
+  if (state.readOnly) {
+    setStatus('只读模式，无法插入图片');
+    return null;
+  }
+  const token = beginProgress('正在处理图片…');
+  let prepared: { src: string; w: number; h: number } | null = null;
+  try {
+    prepared = await prepareImageFile(file);
+  } finally {
+    endProgress(token);
+  }
+  if (progressAborted(token)) {
+    setStatus('已取消插入图片');
+    return null;
+  }
   if (!prepared) {
     if (file.size <= BIG_IMAGE) window.api.showError('无法读取图片');
     return null;
@@ -178,6 +259,10 @@ export async function compressImage(id: string, mime: string, quality: number): 
   const next = canvas.toDataURL(mime, quality);
   const beforeBytes = Math.round((el.src.length * 3) / 4);
   const afterBytes = Math.round((next.length * 3) / 4);
+  if (afterBytes >= beforeBytes * 0.98) {
+    setStatus('压缩后体积未减小，已取消');
+    return false;
+  }
   if (afterBytes < beforeBytes * 0.7) {
     const ok = await window.api.confirm(
       '图片体积明显减小',
@@ -191,6 +276,13 @@ export async function compressImage(id: string, mime: string, quality: number): 
   commitMutation(before, true, '压缩图片');
   renderAll();
   return true;
+}
+
+function isTextEntry(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
 }
 
 function parseElementClipboard(text: string): { elements: El[]; clipId: string } | null {
@@ -216,7 +308,7 @@ export function cloneWithFreshIds(sources: El[], offset = 16): El[] {
   const groupMap = new Map<string, string>();
   const idMap = new Map<string, string>();
   const clones = sources.map((el) => {
-    const clone = structuredClone(el);
+    const clone = cloneEl(el);
     clone.id = uid();
     idMap.set(el.id, clone.id);
     if (clone.groupId) {
@@ -236,6 +328,10 @@ export function cloneWithFreshIds(sources: El[], offset = 16): El[] {
 }
 
 export function insertPastedElements(pasted: { elements: El[]; clipId: string }): void {
+  if (state.readOnly) {
+    setStatus('只读模式，无法粘贴');
+    return;
+  }
   commitEditHook();
   if (pasted.clipId && pasted.clipId === lastClipId) pasteSerial += 1;
   else {
@@ -253,8 +349,18 @@ export function insertPastedElements(pasted: { elements: El[]; clipId: string })
   setStatus(`已粘贴 ${clones.length} 项`);
 }
 
-/** 从剪贴板粘贴（右键菜单用） */
+/** 从剪贴板粘贴（右键菜单/快捷键用）；优先自定义元素格式 */
 export async function pasteFromClipboard(): Promise<void> {
+  if (state.readOnly) {
+    setStatus('只读模式，无法粘贴');
+    return;
+  }
+  const elementsText = await window.api.readClipboardElements();
+  const elementPaste = elementsText ? parseElementClipboard(elementsText) : null;
+  if (elementPaste) {
+    insertPastedElements(elementPaste);
+    return;
+  }
   const text = await window.api.readClipboardText();
   const pasted = text ? parseElementClipboard(text) : null;
   if (pasted) {
@@ -299,21 +405,30 @@ export function installPasteAndDrop(): void {
       if (pasted) e.preventDefault();
       return;
     }
+    // 搜索框、重命名/设置弹窗等输入控件保留原生粘贴行为
+    if (isTextEntry(target)) return;
+    if (state.readOnly) {
+      e.preventDefault();
+      setStatus('只读模式，无法粘贴');
+      return;
+    }
     if (pasted) {
       e.preventDefault();
       insertPastedElements(pasted);
       return;
     }
     const items = e.clipboardData ? Array.from(e.clipboardData.items) : [];
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        const file = item.getAsFile();
-        if (file) {
-          e.preventDefault();
-          void insertImage(file, lastPointerWorld ?? viewportCenter());
-          return;
-        }
-      }
+    const imageFiles = items
+      .filter((item) => item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => !!file);
+    if (imageFiles.length) {
+      e.preventDefault();
+      const at = lastPointerWorld ?? viewportCenter();
+      imageFiles.forEach((file, index) => {
+        void insertImage(file, [at[0] + index * 24, at[1] + index * 24]);
+      });
+      return;
     }
     if (!text || !text.trim()) return;
     e.preventDefault();
@@ -338,8 +453,11 @@ export function installPasteAndDrop(): void {
     selectionChangedHook();
   });
 
-  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('dragover', (e) => {
+    if (!isTextEntry(e.target)) e.preventDefault();
+  });
   document.addEventListener('drop', (e) => {
+    if (isTextEntry(e.target)) return;
     e.preventDefault();
     const dt = e.dataTransfer;
     if (!dt) return;
@@ -352,12 +470,10 @@ export function installPasteAndDrop(): void {
     const vp = viewport.getBoundingClientRect();
     const inside = e.clientX >= vp.left && e.clientX <= vp.right && e.clientY >= vp.top && e.clientY <= vp.bottom;
     const at = inside ? screenToWorld(e.clientX, e.clientY) : viewportCenter();
-    for (const file of files) {
-      if (file.type.startsWith('image/')) {
-        void insertImage(file, at);
-        break;
-      }
-    }
+    const images = files.filter((file) => file.type.startsWith('image/'));
+    images.forEach((file, index) => {
+      void insertImage(file, [at[0] + index * 24, at[1] + index * 24]);
+    });
   });
 }
 
@@ -367,17 +483,27 @@ async function openDroppedBoard(file: File): Promise<void> {
   const withPath = file as File & { path?: string };
   try {
     if (withPath.path) {
-      const result = await window.api.openDoc(withPath.path);
+      const token = beginProgress('正在打开文件…');
+      let result: OpenResult;
+      try {
+        result = await window.api.openDoc(withPath.path);
+      } finally {
+        endProgress(token);
+      }
+      if (progressAborted(token)) {
+        setStatus('已取消打开');
+        return;
+      }
       if (result.error) {
         window.api.showError('无法打开文件：' + result.error);
         return;
       }
       if (result.canceled || !result.path || typeof result.text !== 'string') return;
-      applyOpenedDocument(result.path, result.text, !!result.repaired);
+      applyOpenedDocument(result.path, result.text, !!result.repaired, result.stamp || null, result.report || []);
       return;
     }
     const text = await file.text();
-    applyOpenedDocument(null, text);
+    applyOpenedDocument(null, text, false, null);
   } catch (err) {
     window.api.showError('无法读取文件：' + String((err as Error).message || err));
   }
@@ -540,10 +666,7 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       ctx.font = textFont(el);
       ctx.fillStyle = el.color;
       ctx.textBaseline = 'top';
-      const rawLines = el.text.split('\n');
-      const lines = (el.bullets ? rawLines.map((line) => (line ? '• ' + line : line)) : rawLines).flatMap((line) =>
-        wrapText(ctx, line, el.w)
-      );
+      const lines = listLines(el.text, el.bullets, el.numbered).flatMap((line) => wrapText(ctx, line, el.w));
       if (el.sticky) {
         ctx.fillStyle = el.stickyColor || '#fef3c7';
         ctx.fillRect(el.x - 10, el.y - 10, el.w + 20, Math.max(el.h, lines.length * lineHeight) + 20);
@@ -579,6 +702,14 @@ async function drawElement(ctx: CanvasRenderingContext2D, el: El): Promise<void>
       break;
     }
   }
+  if ((el.type === 'rect' || el.type === 'ellipse' || el.type === 'poly') && el.label) {
+    const b = bounds(el);
+    ctx.fillStyle = '#1f2937';
+    ctx.font = `16px ${FONT}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(el.label, b.x + b.w / 2, b.y + b.h / 2, Math.max(20, b.w - 12));
+  }
   if (needsSave) ctx.restore();
 }
 
@@ -587,6 +718,10 @@ export interface RenderOptions {
   background?: boolean;
   /** 按设置绘制点阵/网格/米色背景 */
   styleBackground?: boolean;
+  /** 导出倍率，默认 2x；超过 8192px 时自动降级 */
+  scale?: number;
+  /** 进度/取消令牌 */
+  token?: number;
 }
 
 function drawBackground(ctx: CanvasRenderingContext2D, b: { x: number; y: number; w: number; h: number }, mode: string): void {
@@ -596,10 +731,11 @@ function drawBackground(ctx: CanvasRenderingContext2D, b: { x: number; y: number
     ctx.strokeStyle = '#e5e7eb';
     ctx.fillStyle = '#e5e7eb';
     ctx.lineWidth = 1;
-    const startX = Math.floor(b.x / 24) * 24;
-    const startY = Math.floor(b.y / 24) * 24;
-    for (let x = startX; x <= b.x + b.w; x += 24) {
-      for (let y = startY; y <= b.y + b.h; y += 24) {
+    const grid = state.settings.gridSize || 24;
+    const startX = Math.floor(b.x / grid) * grid;
+    const startY = Math.floor(b.y / grid) * grid;
+    for (let x = startX; x <= b.x + b.w; x += grid) {
+      for (let y = startY; y <= b.y + b.h; y += grid) {
         if (mode === 'dots') {
           ctx.beginPath();
           ctx.arc(x, y, 1, 0, Math.PI * 2);
@@ -608,13 +744,13 @@ function drawBackground(ctx: CanvasRenderingContext2D, b: { x: number; y: number
       }
     }
     if (mode === 'grid') {
-      for (let x = startX; x <= b.x + b.w; x += 24) {
+      for (let x = startX; x <= b.x + b.w; x += grid) {
         ctx.beginPath();
         ctx.moveTo(x, b.y);
         ctx.lineTo(x, b.y + b.h);
         ctx.stroke();
       }
-      for (let y = startY; y <= b.y + b.h; y += 24) {
+      for (let y = startY; y <= b.y + b.h; y += grid) {
         ctx.beginPath();
         ctx.moveTo(b.x, y);
         ctx.lineTo(b.x + b.w, y);
@@ -635,7 +771,9 @@ export async function renderElementsPng(elements: El[], opts: RenderOptions = {}
   const pad = 40;
   const width = Math.max(1, b.w + pad * 2);
   const height = Math.max(1, b.h + pad * 2);
-  const scale = Math.min(2, 8192 / width, 8192 / height);
+  const requested = Math.max(0.1, Math.min(4, opts.scale ?? 2));
+  const scale = Math.min(requested, 8192 / width, 8192 / height);
+  lastRenderScale = scale;
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.ceil(width * scale));
   canvas.height = Math.max(1, Math.ceil(height * scale));
@@ -650,7 +788,11 @@ export async function renderElementsPng(elements: El[], opts: RenderOptions = {}
   }
   ctx.scale(scale, scale);
   ctx.translate(-b.x + pad, -b.y + pad);
-  for (const el of target) await drawElement(ctx, el);
+  for (let i = 0; i < target.length; i++) {
+    if (opts.token && progressAborted(opts.token)) throw new Error('已取消');
+    if (opts.token) updateProgress(`正在渲染 ${i + 1}/${target.length}…`);
+    await drawElement(ctx, target[i]);
+  }
   return canvas.toDataURL('image/png');
 }
 
@@ -658,9 +800,47 @@ export async function renderPng(opts: RenderOptions = {}): Promise<string | null
   return renderElementsPng(state.doc.elements, opts);
 }
 
+let pngExportScale = 2;
+let pngExportBackground = true;
+
 export async function exportPng(): Promise<boolean> {
   commitEditHook();
-  const dataUrl = await renderPng({ styleBackground: state.settings.exportBackground });
+  const form = await openForm(
+    '导出 PNG',
+    [
+      {
+        key: 'scale',
+        label: '倍率',
+        type: 'select',
+        value: String(pngExportScale),
+        options: [
+          { value: '1', label: '1x' },
+          { value: '2', label: '2x' },
+          { value: '3', label: '3x' }
+        ]
+      },
+      { key: 'background', label: '包含背景', type: 'checkbox', value: pngExportBackground }
+    ],
+    '导出'
+  );
+  if (!form) return false;
+  pngExportScale = Math.max(1, Math.min(3, Number(form.scale) || 2));
+  pngExportBackground = form.background === true;
+  const token = beginProgress('正在渲染 PNG…');
+  let dataUrl: string | null = null;
+  try {
+    dataUrl = await renderPng({
+      scale: pngExportScale,
+      background: pngExportBackground,
+      styleBackground: pngExportBackground && state.settings.exportBackground,
+      token
+    });
+  } catch {
+    setStatus('已取消导出');
+    return false;
+  } finally {
+    endProgress(token);
+  }
   if (!dataUrl) {
     setStatus('画布为空');
     return false;
@@ -671,7 +851,8 @@ export async function exportPng(): Promise<boolean> {
     return false;
   }
   if (result.canceled || !result.path) return false;
-  setStatus(state.selectedIds.length ? '已导出选中区域' : '已导出 PNG');
+  const actual = lastRenderScale < pngExportScale - 0.01 ? `，受 8192px 限制实际 ${lastRenderScale.toFixed(2)}x` : '';
+  setStatus((state.selectedIds.length ? '已导出选中区域' : '已导出 PNG') + '（' + pngExportScale + 'x' + actual + '）');
   return true;
 }
 
@@ -689,7 +870,16 @@ export async function copySelectionPng(): Promise<boolean> {
 
 export async function printCanvas(mode: 'pdf' | 'print'): Promise<boolean> {
   commitEditHook();
-  const dataUrl = await renderPng({ selection: false, background: true, styleBackground: state.settings.exportBackground });
+  const token = beginProgress(mode === 'pdf' ? '正在生成 PDF…' : '正在准备打印…');
+  let dataUrl: string | null = null;
+  try {
+    dataUrl = await renderPng({ selection: false, background: true, styleBackground: state.settings.exportBackground, token });
+  } catch {
+    setStatus('已取消');
+    return false;
+  } finally {
+    endProgress(token);
+  }
   if (!dataUrl) {
     setStatus('画布为空');
     return false;
@@ -705,12 +895,76 @@ export async function printCanvas(mode: 'pdf' | 'print'): Promise<boolean> {
 }
 
 /** 导出所有页面为多页 A4 横向 PDF */
+export async function exportAllPagesZip(format: 'png' | 'svg', target?: string): Promise<boolean> {
+  commitEditHook();
+  syncActivePage();
+  const entries: { name: string; data: string; base64?: boolean }[] = [];
+  const token = beginProgress(`正在导出 ${format.toUpperCase()}…`);
+  try {
+    for (let i = 0; i < state.pages.length; i++) {
+      if (progressAborted(token)) throw new Error('已取消');
+      updateProgress(`正在导出 ${format.toUpperCase()} ${i + 1}/${state.pages.length}…`);
+      const page = state.pages[i];
+      const name = `page-${String(i + 1).padStart(2, '0')}.${format}`;
+      if (format === 'png') {
+        const dataUrl = await renderElementsPng(page.elements, {
+          selection: false,
+          background: true,
+          styleBackground: state.settings.exportBackground,
+          token
+        });
+        if (dataUrl) entries.push({ name, data: dataUrl, base64: true });
+      } else {
+        const svg = buildSvg(page.elements);
+        if (svg) entries.push({ name, data: svg });
+      }
+    }
+  } catch {
+    setStatus('已取消导出');
+    return false;
+  } finally {
+    endProgress(token);
+  }
+  if (!entries.length) {
+    setStatus('所有页面为空');
+    return false;
+  }
+  setStatus(`正在导出 ${entries.length} 页 ${format.toUpperCase()}…`);
+  const result = await window.api.exportZip(entries, '白板页面-' + format, target);
+  if (result.error) {
+    setStatus('导出页面失败：' + result.error);
+    return false;
+  }
+  if (result.canceled || !result.path) {
+    setStatus('');
+    return false;
+  }
+  setStatus(`已导出 ${entries.length} 页 ${format.toUpperCase()}`);
+  return true;
+}
+
 export async function exportAllPagesPdf(): Promise<boolean> {
   commitEditHook();
+  syncActivePage();
   const images: string[] = [];
-  for (const page of state.pages) {
-    const dataUrl = await renderElementsPng(page.elements, { selection: false, background: true, styleBackground: state.settings.exportBackground });
-    if (dataUrl) images.push(dataUrl);
+  const token = beginProgress('正在生成多页 PDF…');
+  try {
+    for (let i = 0; i < state.pages.length; i++) {
+      if (progressAborted(token)) throw new Error('已取消');
+      updateProgress(`正在渲染第 ${i + 1}/${state.pages.length} 页…`);
+      const dataUrl = await renderElementsPng(state.pages[i].elements, {
+        selection: false,
+        background: true,
+        styleBackground: state.settings.exportBackground,
+        token
+      });
+      if (dataUrl) images.push(dataUrl);
+    }
+  } catch {
+    setStatus('已取消导出');
+    return false;
+  } finally {
+    endProgress(token);
   }
   if (!images.length) {
     setStatus('所有页面为空');
@@ -737,11 +991,10 @@ function svgDash(dash: Dash | undefined, width: number): string {
 
 function svgElText(el: TextEl): string {
   const lh = el.fontSize * (el.lineHeight || 1.4);
-  const raw = el.text.split('\n');
   const lines: { text: string; width: number }[] = [];
   const measure = document.createElement('canvas').getContext('2d');
   if (measure) measure.font = textFont(el);
-  for (const line of (el.bullets ? raw.map((l) => (l ? '• ' + l : l)) : raw)) {
+  for (const line of listLines(el.text, el.bullets, el.numbered)) {
     if (!measure) {
       lines.push({ text: line, width: 0 });
       continue;
@@ -760,14 +1013,16 @@ function svgElText(el: TextEl): string {
   const align = el.align || 'left';
   const x = align === 'center' ? el.x + el.w / 2 : align === 'right' ? el.x + el.w : el.x;
   const anchor = align === 'center' ? 'middle' : align === 'right' ? 'end' : 'start';
-  const font = `${el.italic ? 'italic ' : ''}${el.bold ? '700 ' : ''}${el.fontSize}px ${escXml(el.fontFamily || FONT)}`;
+  const fontAttrs =
+    `font-family="${escXml(el.fontFamily || FONT)}" font-size="${el.fontSize}" ` +
+    `font-weight="${el.bold ? '700' : '400'}" font-style="${el.italic ? 'italic' : 'normal'}"`;
   let out = '';
   if (el.sticky) {
     out += `<rect x="${el.x - 10}" y="${el.y - 10}" width="${el.w + 20}" height="${Math.max(el.h, lines.length * lh) + 20}" fill="${escXml(el.stickyColor || '#fef3c7')}" rx="4"/>`;
   }
   lines.forEach((line, i) => {
     const y = el.y + i * lh + (lh - el.fontSize) / 2 + el.fontSize * 0.8;
-    out += `<text x="${x}" y="${y}" font="${font}" fill="${escXml(el.color)}" text-anchor="${anchor}" xml:space="preserve">${escXml(line.text)}</text>`;
+    out += `<text x="${x}" y="${y}" ${fontAttrs} fill="${escXml(el.color)}" text-anchor="${anchor}" xml:space="preserve">${escXml(line.text)}</text>`;
     if (el.underline) {
       const sx = align === 'center' ? x - line.width / 2 : align === 'right' ? x - line.width : x;
       out += `<line x1="${sx}" y1="${y + 1}" x2="${sx + line.width}" y2="${y + 1}" stroke="${escXml(el.color)}" stroke-width="1"/>`;
@@ -777,6 +1032,31 @@ function svgElText(el: TextEl): string {
       out += `<line x1="${sx}" y1="${y - el.fontSize * 0.3}" x2="${sx + line.width}" y2="${y - el.fontSize * 0.3}" stroke="${escXml(el.color)}" stroke-width="1"/>`;
     }
   });
+  return out;
+}
+
+function svgBackground(b: { x: number; y: number; w: number; h: number }, pad: number, width: number, height: number): string {
+  const mode = state.settings.background;
+  const x = b.x - pad;
+  const y = b.y - pad;
+  const fill = mode === 'cream' ? '#faf6ee' : '#ffffff';
+  let out = `<rect x="${x}" y="${y}" width="${width}" height="${height}" fill="${fill}"/>`;
+  if (mode !== 'dots' && mode !== 'grid') return out;
+  const grid = state.settings.gridSize || 24;
+  const startX = Math.floor(x / grid) * grid;
+  const startY = Math.floor(y / grid) * grid;
+  if (mode === 'grid') {
+    out += `<g stroke="#e5e7eb" stroke-width="1">`;
+    for (let gx = startX; gx <= x + width; gx += grid) out += `<line x1="${gx}" y1="${y}" x2="${gx}" y2="${y + height}"/>`;
+    for (let gy = startY; gy <= y + height; gy += grid) out += `<line x1="${x}" y1="${gy}" x2="${x + width}" y2="${gy}"/>`;
+    out += `</g>`;
+  } else {
+    out += `<g fill="#e5e7eb">`;
+    for (let gx = startX; gx <= x + width; gx += grid) {
+      for (let gy = startY; gy <= y + height; gy += grid) out += `<circle cx="${gx}" cy="${gy}" r="1"/>`;
+    }
+    out += `</g>`;
+  }
   return out;
 }
 
@@ -804,9 +1084,25 @@ export function buildSvg(elements: El[]): string | null {
         break;
       case 'image': {
         const crop = el.crop || { x: 0, y: 0, w: 1, h: 1 };
-        part = `<image x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" preserveAspectRatio="none" href="${escXml(el.src)}"/>`;
-        if (crop.w < 1 || crop.h < 1 || crop.x > 0 || crop.y > 0 || el.flipH || el.flipV) {
-          part = `<g clip-path="url(#clip-${escXml(el.id)})">${part}</g>`;
+        const cropped = crop.w < 1 || crop.h < 1 || crop.x > 0 || crop.y > 0;
+        if (cropped || el.flipH || el.flipV) {
+          const view = 1000;
+          const cw = Math.max(0.001, crop.w);
+          const ch = Math.max(0.001, crop.h);
+          const ix = (-crop.x / cw) * view;
+          const iy = (-crop.y / ch) * view;
+          const iw = view / cw;
+          const ih = view / ch;
+          const sx = el.flipH ? -1 : 1;
+          const sy = el.flipV ? -1 : 1;
+          const tx = el.flipH ? view : 0;
+          const ty = el.flipV ? view : 0;
+          const transform = sx < 0 || sy < 0 ? ` transform="translate(${tx} ${ty}) scale(${sx} ${sy})"` : '';
+          part =
+            `<svg x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" viewBox="0 0 ${view} ${view}" preserveAspectRatio="none">` +
+            `<g${transform}><image x="${ix}" y="${iy}" width="${iw}" height="${ih}" preserveAspectRatio="none" href="${escXml(el.src)}"/></g></svg>`;
+        } else {
+          part = `<image x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" preserveAspectRatio="none" href="${escXml(el.src)}"/>`;
         }
         break;
       }
@@ -838,23 +1134,25 @@ export function buildSvg(elements: El[]): string | null {
         break;
       }
     }
+    if ((el.type === 'rect' || el.type === 'ellipse' || el.type === 'poly') && el.label) {
+      const lb = bounds(el);
+      part +=
+        `<text x="${lb.x + lb.w / 2}" y="${lb.y + lb.h / 2}" text-anchor="middle" dominant-baseline="middle" ` +
+        `font-family="${escXml(FONT)}" font-size="16" fill="#1f2937">${escXml(el.label)}</text>`;
+    }
     body += open + part + close;
   }
-  const clipDefs = visible
-    .filter((el): el is ImageEl => el.type === 'image' && !!(el.crop && (el.crop.w < 1 || el.crop.h < 1 || el.crop.x > 0 || el.crop.y > 0)))
-    .map((el) => `<clipPath id="clip-${escXml(el.id)}"><rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}"/></clipPath>`)
-    .join('');
-  const bg = state.settings.exportBackground
-    ? `<rect x="${b.x - pad}" y="${b.y - pad}" width="${width}" height="${height}" fill="#ffffff"/>`
-    : '';
+  const bg = state.settings.exportBackground ? svgBackground(b, pad, width, height) : '';
   return `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${b.x - pad} ${b.y - pad} ${width} ${height}">` +
-    `<defs>${clipDefs}</defs>${bg}${body}</svg>`;
+    `<defs></defs>${bg}${body}</svg>`;
 }
 
 export async function exportSvg(): Promise<boolean> {
   commitEditHook();
-  const svg = buildSvg(state.doc.elements);
+  const ids = new Set(state.selectedIds);
+  const selected = state.doc.elements.filter((el) => ids.has(el.id) && !el.hidden);
+  const svg = buildSvg(selected.length ? selected : state.doc.elements);
   if (!svg) {
     setStatus('画布为空');
     return false;
@@ -865,7 +1163,7 @@ export async function exportSvg(): Promise<boolean> {
     return false;
   }
   if (result.canceled || !result.path) return false;
-  setStatus('已导出 SVG');
+  setStatus(selected.length ? '已导出选中区域 SVG' : '已导出 SVG');
   return true;
 }
 
@@ -873,13 +1171,32 @@ export async function saveDocument(forceDialog: boolean): Promise<boolean> {
   commitEditHook();
   const rev = state.revision;
   const text = serialize();
-  const result = await window.api.saveDoc(forceDialog ? null : state.filePath, text, false);
+  const expected = !forceDialog && state.filePath ? state.fileStamp : null;
+  setSaveStatus('saving');
+  const result = await window.api.saveDoc(forceDialog ? null : state.filePath, text, false, expected);
+  if (result.reload && result.path && typeof result.text === 'string') {
+    applyOpenedDocument(result.path, result.text, false, result.stamp || null);
+    setStatus('已重新载入磁盘上的版本');
+    return false;
+  }
+  if (result.conflict) {
+    state.autosaveBlocked = true;
+    setSaveStatus('conflict');
+    setStatus('文件已被外部修改，请另存为或重新打开');
+    return false;
+  }
   if (result.error) {
+    setSaveStatus('error');
     setStatus('保存失败：' + result.error);
     return false;
   }
-  if (result.canceled || !result.path) return false;
+  if (result.canceled || !result.path) {
+    setSaveStatus(state.dirty ? 'dirty' : 'saved');
+    return false;
+  }
   state.filePath = result.path;
+  state.fileStamp = result.stamp || null;
+  state.autosaveBlocked = false;
   if (state.revision === rev) markSaved();
   else markDirty();
   return true;
@@ -887,20 +1204,77 @@ export async function saveDocument(forceDialog: boolean): Promise<boolean> {
 
 export async function backupNow(): Promise<boolean> {
   commitEditHook();
-  const result = await window.api.backupNow(serialize(), state.filePath);
+  const result = await window.api.backupNow(serialize(), state.filePath, state.recoveryKey);
   setStatus(result.path ? '已备份' : '备份失败');
   return !!result.path;
+}
+
+function pickBackup(): Promise<{ path: string; name: string } | null> {
+  return new Promise((resolve) => {
+    void window.api.listBackups().then((backups) => {
+      if (!backups.length) {
+        window.api.showError('没有可恢复的自动备份');
+        resolve(null);
+        return;
+      }
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      const panel = document.createElement('div');
+      panel.className = 'help-panel modal-panel backup-panel';
+      panel.setAttribute('role', 'dialog');
+      panel.setAttribute('aria-modal', 'true');
+      const title = document.createElement('h2');
+      title.textContent = '恢复自动备份';
+      const list = document.createElement('div');
+      list.className = 'backup-list';
+      const close = (value: { path: string; name: string } | null) => {
+        overlay.remove();
+        resolve(value);
+      };
+      for (const backup of backups) {
+        const row = document.createElement('div');
+        row.className = 'backup-row';
+        const info = document.createElement('div');
+        info.className = 'backup-info';
+        const name = document.createElement('strong');
+        name.textContent = backup.name;
+        const meta = document.createElement('span');
+        meta.textContent = `${new Date(backup.mtime).toLocaleString()} · ${(backup.size / 1024).toFixed(0)} KB`;
+        info.append(name, meta);
+        const restore = document.createElement('button');
+        restore.textContent = '恢复';
+        restore.addEventListener('click', () => close({ path: backup.path, name: backup.name }));
+        const remove = document.createElement('button');
+        remove.textContent = '删除';
+        remove.addEventListener('click', async () => {
+          const result = await window.api.deleteBackup(backup.path);
+          if (result.error) setStatus('删除备份失败：' + result.error);
+          else row.remove();
+        });
+        row.append(info, restore, remove);
+        list.appendChild(row);
+      }
+      const cancel = document.createElement('button');
+      cancel.textContent = '取消';
+      cancel.addEventListener('click', () => close(null));
+      const actions = document.createElement('div');
+      actions.className = 'settings-actions';
+      actions.appendChild(cancel);
+      panel.append(title, list, actions);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close(null);
+      });
+    });
+  });
 }
 
 export async function restoreBackup(): Promise<boolean> {
   if (!(await confirmDiscard())) return false;
   cancelEditHook();
-  const picked = await window.api.restoreBackup();
-  if (picked.error) {
-    window.api.showError('无法恢复备份：' + picked.error);
-    return false;
-  }
-  if (picked.canceled || !picked.path) return false;
+  const picked = await pickBackup();
+  if (!picked) return false;
   const result = await window.api.openDoc(picked.path);
   if (result.error || typeof result.text !== 'string') {
     window.api.showError('无法恢复备份：' + (result.error || '文件为空'));
@@ -913,6 +1287,8 @@ export async function restoreBackup(): Promise<boolean> {
     return false;
   }
   state.filePath = null;
+  state.fileStamp = null;
+  state.autosaveBlocked = false;
   state.selectedIds = [];
   state.revision = 0;
   clearHistory();
@@ -931,22 +1307,40 @@ export async function confirmDiscard(): Promise<boolean> {
 
 const KNOWN_FONTS = ['Microsoft YaHei', 'SimSun', 'SimHei', 'KaiTi', 'Segoe UI', 'Arial', 'Courier New'];
 
-function warnMissingFonts(): void {
+function warnMissingFonts(report?: string[]): void {
   const missing = new Set<string>();
   for (const el of state.doc.elements) {
     if (el.type === 'text' && el.fontFamily && !KNOWN_FONTS.includes(el.fontFamily)) missing.add(el.fontFamily);
   }
-  if (missing.size) setStatus('缺少字体，已回退：' + Array.from(missing).join(', '));
+  if (missing.size) {
+    const text = '缺少字体，已回退：' + Array.from(missing).join(', ');
+    setStatus(text);
+    report?.push(text);
+  }
 }
 
-export function applyOpenedDocument(path: string | null, text: string, repaired = false): boolean {
+function showOpenReport(report: string[]): void {
+  if (!report.length) return;
+  void window.api.showInfo('打开报告', report.join('\n'));
+}
+
+export function applyOpenedDocument(
+  path: string | null,
+  text: string,
+  repaired = false,
+  stamp: FileStamp | null = null,
+  extraReport: string[] = []
+): boolean {
+  const report = [...extraReport];
   try {
-    loadFromText(text);
+    loadFromText(text, report);
   } catch (err) {
     window.api.showError('无法打开文件：' + String((err as Error).message || err));
     return false;
   }
   state.filePath = repaired ? null : path;
+  state.fileStamp = repaired ? null : stamp;
+  state.autosaveBlocked = false;
   state.selectedIds = [];
   state.revision = 0;
   clearHistory();
@@ -957,28 +1351,34 @@ export function applyOpenedDocument(path: string | null, text: string, repaired 
     setStatus('文件已损坏，已恢复部分内容，请另存为');
   } else {
     markSaved();
-    warnMissingFonts();
+    warnMissingFonts(report);
   }
+  showOpenReport(report);
   selectionChangedHook();
   return true;
 }
 
-export function applyRecoveredDocument(text: string, path: string | null): boolean {
+export function applyRecoveredDocument(text: string, path: string | null, stamp: FileStamp | null = null): boolean {
+  const report: string[] = [];
   try {
-    loadFromText(text);
+    loadFromText(text, report);
   } catch (err) {
     window.api.showError('无法恢复未保存内容：' + String((err as Error).message || err));
     return false;
   }
   state.filePath = path || null;
+  state.fileStamp = stamp || null;
+  // 没有时间戳的旧快照无法判断磁盘文件是否被外部修改，先暂停自动保存
+  state.autosaveBlocked = !!path && !stamp;
   state.selectedIds = [];
   state.revision = 0;
   clearHistory();
   renderAll();
   fitToContent();
   markDirty({ autosave: false });
-  warnMissingFonts();
-  setStatus('已恢复上次未保存的编辑内容');
+  warnMissingFonts(report);
+  setStatus(state.autosaveBlocked ? '已恢复未保存内容；自动保存已暂停，请手动保存' : '已恢复上次未保存的编辑内容');
+  showOpenReport(report);
   selectionChangedHook();
   return true;
 }
@@ -986,13 +1386,23 @@ export function applyRecoveredDocument(text: string, path: string | null): boole
 export async function openDocument(path?: string): Promise<void> {
   if (!(await confirmDiscard())) return;
   cancelEditHook();
-  const result = await window.api.openDoc(path);
+  const token = beginProgress('正在打开文件…');
+  let result: OpenResult;
+  try {
+    result = await window.api.openDoc(path);
+  } finally {
+    endProgress(token);
+  }
+  if (progressAborted(token)) {
+    setStatus('已取消打开');
+    return;
+  }
   if (result.error) {
     window.api.showError('无法打开文件：' + result.error);
     return;
   }
   if (result.canceled || !result.path || typeof result.text !== 'string') return;
-  applyOpenedDocument(result.path, result.text, !!result.repaired);
+  applyOpenedDocument(result.path, result.text, !!result.repaired, result.stamp || null, result.report || []);
 }
 
 export async function newDocument(): Promise<void> {

@@ -18,6 +18,10 @@ const ICONS: Record<string, string> = {
   diamond: '<path d="M10 3l7 7-7 7-7-7z"/>',
   star: '<path d="M10 2.5l2.2 4.6 5 .7-3.6 3.5.9 5-4.5-2.4L5.5 16l.9-5L2.8 7.8l5-.7z"/>',
   roundrect: '<rect x="3.5" y="5" width="13" height="10" rx="4"/>',
+  hexagon: '<path d="M10 3l5.5 3.2v7.6L10 17l-5.5-3.2V6.2z"/>',
+  cylinder: '<ellipse cx="10" cy="5.5" rx="6" ry="2.2"/><path d="M4 5.5v9c0 1.2 2.7 2.2 6 2.2s6-1 6-2.2v-9"/>',
+  cloud: '<path d="M6 15h8a3 3 0 000-6 4 4 0 00-7.7-1A3.2 3.2 0 006 15z"/>',
+  lane: '<rect x="3" y="4" width="14" height="12" rx="1"/><path d="M3 8h14M8 8v8"/>',
   image: '<rect x="3" y="4" width="14" height="12" rx="1"/><circle cx="7.5" cy="8" r="1.2"/><path d="M4 14l4-4 3 3 2-2 3 3"/>'
 };
 

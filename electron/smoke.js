@@ -20,8 +20,14 @@ module.exports = async function runSmoke(win) {
   const tmpPages = path.join(os.tmpdir(), `wbc-smoke-${stamp}-pages.wbc`);
   const tmpRepairJson = path.join(os.tmpdir(), `wbc-smoke-${stamp}-repair.wbc`);
   const tmpRepairZip = path.join(os.tmpdir(), `wbc-smoke-${stamp}-repairzip.wbc`);
+  const tmpConflict = path.join(os.tmpdir(), `wbc-smoke-${stamp}-conflict.wbc`);
+  const tmpConcurrent = path.join(os.tmpdir(), `wbc-smoke-${stamp}-concurrent.wbc`);
+  const tmpPagesZip = path.join(os.tmpdir(), `wbc-smoke-${stamp}-pages.zip`);
+  const tmpSvgSel = path.join(os.tmpdir(), `wbc-smoke-${stamp}-selsvg.svg`);
+  const tmpCropSvg = path.join(os.tmpdir(), `wbc-smoke-${stamp}-cropsvg.svg`);
   const userData = app.getPath('userData');
   const backupsDir = path.join(userData, 'backups');
+  const recoveryDir = path.join(userData, 'recovery');
   let failures = 0;
 
   const run = (code) => win.webContents.executeJavaScript(code, true);
@@ -53,6 +59,10 @@ module.exports = async function runSmoke(win) {
     const buf = fs.readFileSync(file);
     return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
   };
+  const pngDataSize = (dataUrl) => {
+    const buf = Buffer.from(String(dataUrl).slice(String(dataUrl).indexOf(',') + 1), 'base64');
+    return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+  };
   const clickWorld = (x, y, alt = false) =>
     "(function(){var vp=document.getElementById('viewport');var r=vp.getBoundingClientRect();" +
     `var fire=function(t,cx,cy,btn,buttons){vp.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:cx,clientY:cy,button:btn,buttons:buttons,pointerId:21,pointerType:'mouse',altKey:${alt}}));};` +
@@ -63,7 +73,7 @@ module.exports = async function runSmoke(win) {
   try {
     await run("new Promise(function(resolve){var t=setInterval(function(){if(window.__test){clearInterval(t);resolve(true);}},20);})");
     const buttons = await run("document.querySelectorAll('#toolbar button').length");
-    check('toolbar-p2-buttons', buttons === 16, buttons);
+    check('toolbar-p2-buttons', buttons === 20, buttons);
 
     const initial = await run('__test.count()');
     check('initial-empty', initial === 0, initial);
@@ -214,6 +224,15 @@ module.exports = async function runSmoke(win) {
     const backOrder = await run('__test.order()');
     const backOk = backOrder.slice(0, 3).join(',') === firstThree.join(',');
     check('z-order', frontOk && backOk, { front: frontOrder, back: backOrder });
+
+    // DOM 顺序必须与元素顺序一致（增量渲染后仍需保持图层叠放次序）
+    const domOrder = await run(
+      "(() => {const w=document.getElementById('world');" +
+        "const ids=[];for(const n of w.children){if(n.id==='editor')continue;if(n.dataset&&n.dataset.id)ids.push(n.dataset.id);}" +
+        'return ids;})()'
+    );
+    const domMatches = (await run('__test.order()')).join(',') === domOrder.join(',');
+    check('z-order-dom', domMatches, { dom: domOrder, expected: await run('__test.order()') });
 
     await run('__test.reset()');
     const paletteTextId = await run("__test.addText('调色', 100, 120)");
@@ -452,7 +471,8 @@ module.exports = async function runSmoke(win) {
       "(() => {const r=document.getElementById('opacity-range');r.value='50';r.dispatchEvent(new Event('change'));return __test.el(" + j(styleId) + ").opacity;})()"
     );
     const styleDom = await run(
-      "(() => {const n=document.querySelector('[data-id=\"" + styleId + "\"]');return {opacity:n.style.opacity,border:n.style.borderStyle};})()"
+      "(() => {const n=document.querySelector('[data-id=\"" + styleId + "\"]');const p=n.querySelector('path');" +
+        "return {opacity:n.style.opacity,dash:p?p.getAttribute('stroke-dasharray'):''};})()"
     );
     const styleSvg = await run('__test.exportSvgTo(' + j(tmpStyleSvg) + ')');
     let styleSvgOk = false;
@@ -467,7 +487,7 @@ module.exports = async function runSmoke(win) {
     const savedStyle = styleSaved && styleSaved.elements && styleSaved.elements.find((el) => el.id === styleId);
     check(
       'stroke-dash-opacity',
-      dashValue === 'dash' && opacityValue === 0.5 && styleDom.opacity === '0.5' && styleDom.border === 'dashed' &&
+      dashValue === 'dash' && opacityValue === 0.5 && styleDom.opacity === '0.5' && !!styleDom.dash &&
         styleSvgOk && savedStyle && savedStyle.dash === 'dash' && savedStyle.opacity === 0.5,
       { dashValue, opacityValue, styleDom, styleSvgOk, savedStyle }
     );
@@ -593,6 +613,48 @@ module.exports = async function runSmoke(win) {
     );
     check('status-minimap', /选中 1\/1/.test(statusText) && minimap.w > 0 && minimap.h > 0, { statusText, minimap });
 
+    // 低配模式：隐藏小地图与标尺，且不影响文档操作
+    const lowSpecApplied = await run(
+      "(async()=>{const ok=await __test.applySettings({lowSpec:true});" +
+        "const m=document.getElementById('minimap');const r=document.getElementById('ruler-h');" +
+        "return {ok,minimapHidden:m.hidden,rulerHidden:r.hidden};})()"
+    );
+    await run('__test.reset()');
+    await run("__test.addShape('rect', 100, 100, 80, 60)");
+    const lowSpecCount = await run('__test.count()');
+    const lowSpecOff = await run("(async()=>{await __test.applySettings({lowSpec:false});return true;})()");
+    check(
+      'low-spec-mode',
+      lowSpecApplied.ok === true && lowSpecApplied.minimapHidden === true && lowSpecApplied.rulerHidden === true &&
+        lowSpecCount === 1 && lowSpecOff === true,
+      { lowSpecApplied, lowSpecCount, lowSpecOff }
+    );
+
+    // 低配模式：便签阴影改用边框、荧光笔混合模式关闭（软件光栅化下成本高）
+    await run('__test.reset()');
+    await run("__test.addSticky('便签', 100, 100)");
+    await run("__test.addInk([[200,200],[260,240]], '#111', 4, true)");
+    const effects = async () =>
+      run(
+        "(() => {const nodes=[...document.getElementById('world').children].filter(n=>n.id!=='editor');" +
+          "let shadow='none',blend='normal',border='';" +
+          "for(const n of nodes){const s=n.style;" +
+          "if(s.boxShadow&&s.boxShadow!=='none')shadow=s.boxShadow;" +
+          "if(s.mixBlendMode)blend=s.mixBlendMode;" +
+          "if(s.border)border=s.border;}" +
+          'return {shadow,blend,border};})()'
+      );
+    const effectsNormal = await effects();
+    await run("(async()=>{await __test.applySettings({lowSpec:true});return 1;})()");
+    const effectsLow = await effects();
+    await run("(async()=>{await __test.applySettings({lowSpec:false});return 1;})()");
+    check(
+      'low-spec-effects',
+      /10px/.test(effectsNormal.shadow) && effectsNormal.blend === 'multiply' &&
+        effectsLow.shadow === 'none' && effectsLow.blend === 'normal' && /10px/.test(effectsLow.border),
+      { effectsNormal, effectsLow }
+    );
+
     // 导出选中区域 + 复制选区 PNG
     await run('__test.reset()');
     await run("__test.addShape('rect', 100, 100, 100, 100)");
@@ -685,13 +747,17 @@ module.exports = async function runSmoke(win) {
         "const e=document.getElementById('editor');e.value='恢复测试草稿';e.dispatchEvent(new Event('input',{bubbles:true}));" +
         "return !e.hidden;})()"
     );
-    await new Promise((resolve) => setTimeout(resolve, 3400));
-    const recoveryFile = path.join(userData, 'recovery.wbc');
-    const recoveryExists = fs.existsSync(recoveryFile);
+    await new Promise((resolve) => setTimeout(resolve, 3800));
+    const recoveryList = () =>
+      fs.existsSync(recoveryDir)
+        ? fs.readdirSync(recoveryDir).filter((name) => name.endsWith('.json') && !name.endsWith('.meta.json'))
+        : [];
+    const recoveryFiles = recoveryList();
+    const recoveryExists = recoveryFiles.length > 0;
     let recoveryOk = false;
     if (recoveryExists) {
       try {
-        const doc = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'));
+        const doc = JSON.parse(fs.readFileSync(path.join(recoveryDir, recoveryFiles[0]), 'utf8'));
         recoveryOk =
           doc.pages && doc.pages.length === 2 && doc.activePage === 0 &&
           doc.pages[0].elements.some((el) => el.type === 'text' && el.text === '恢复测试草稿');
@@ -702,11 +768,31 @@ module.exports = async function runSmoke(win) {
     await run("(() => {const e=document.getElementById('editor');e.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));return true;})()");
     await run('window.api.clearRecovery()');
     await new Promise((resolve) => setTimeout(resolve, 120));
-    check('recovery-snapshot', editOpened === true && recoveryExists && recoveryOk && !fs.existsSync(recoveryFile), {
+    const recoveryDbg = await run('__test.recoveryDebug()');
+    check('recovery-snapshot', editOpened === true && recoveryExists && recoveryOk && recoveryList().length === 0, {
       editOpened,
       recoveryExists,
       recoveryOk,
-      cleared: !fs.existsSync(recoveryFile)
+      cleared: recoveryList().length === 0,
+      recoveryDbg
+    });
+
+    // 多窗口/多文档恢复快照互不覆盖（按 key 隔离）
+    await run(
+      "(async () => {await window.api.writeRecovery('{\"doc\":\"A\"}', '', 'smokeKeyA', null);" +
+        "await window.api.writeRecovery('{\"doc\":\"B\"}', '', 'smokeKeyB', null);return true;})()"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 220));
+    const isolated = recoveryList();
+    const hasA = isolated.includes('smokeKeyA.json');
+    const hasB = isolated.includes('smokeKeyB.json');
+    await run("window.api.clearRecovery('smokeKeyA')");
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const afterClearA = recoveryList();
+    await run("window.api.clearRecovery('smokeKeyB')");
+    check('recovery-isolation', hasA && hasB && !afterClearA.includes('smokeKeyA.json') && afterClearA.includes('smokeKeyB.json'), {
+      isolated,
+      afterClearA
     });
 
     // 日志
@@ -823,6 +909,20 @@ module.exports = async function runSmoke(win) {
     const cropEl = await run('__test.el(' + j(cropId) + ')');
     check('p2-svg-crop', svgOk && cropped === true && cropEl && cropEl.crop && cropEl.crop.w === 0.5, { svgOk, cropped, cropEl });
 
+    await run('__test.reset()');
+    const svgTextId = await run("__test.addText('SVG 字体', 100, 100)");
+    await run('__test.setTextStyle(' + j(svgTextId) + ", {bold:true, fontFamily:'SimSun', fontSize:32})");
+    const svgTextExport = await run('__test.exportSvgTo(' + j(tmpStyleSvg) + ')');
+    let svgTextOk = false;
+    try {
+      const text = fs.readFileSync(tmpStyleSvg, 'utf8');
+      svgTextOk = svgTextExport === true && text.includes('font-size="32"') && text.includes('font-family="SimSun"') &&
+        text.includes('font-weight="700"') && !text.includes(' font="');
+    } catch {
+      svgTextOk = false;
+    }
+    check('svg-text-font', svgTextOk, { svgTextOk });
+
     // P2：主题/语言/图标/无障碍/设置持久化
     await run('__test.reset()');
     const focusId = await run("__test.addText('焦点', 100, 100)");
@@ -936,12 +1036,330 @@ module.exports = async function runSmoke(win) {
         '})()'
     );
     check('right-drag-pan', panTransform.includes('translate(60px, 30px)'), panTransform);
+
+    // BUG-04：输入框/输入法组合期间不触发画布快捷键
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    const kbText = await run("__test.addText('键盘隔离', 100, 100)");
+    await run('__test.select(' + j([kbText]) + ')');
+    const kb = await run(
+      "(() => {const bar=document.getElementById('searchbar');const input=document.getElementById('search-input');" +
+        "bar.hidden=false;input.focus();" +
+        "const activeTool=()=>{const b=document.querySelector('#toolbar button.active');return b?b.dataset.tool:'';};" +
+        "const before={count:__test.count(),selected:__test.selectedIds().length,tool:activeTool()};" +
+        "const fire=(key,extra)=>input.dispatchEvent(new KeyboardEvent('keydown',Object.assign({key,bubbles:true,cancelable:true},extra||{})));" +
+        "['Delete','Backspace','ArrowRight','r','1',' '].forEach(k=>fire(k));fire('r',{isComposing:true,keyCode:229});" +
+        "const dt=new DataTransfer();dt.setData('text/plain','不应写入画布');" +
+        "input.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:dt}));" +
+        "const after={count:__test.count(),selected:__test.selectedIds().length,tool:activeTool()};" +
+        "input.value='';input.blur();bar.hidden=true;" +
+        "window.dispatchEvent(new KeyboardEvent('keydown',{key:'r',isComposing:true,keyCode:229,bubbles:true,cancelable:true}));" +
+        "const afterIme=activeTool();return {before,after,afterIme};})()"
+    );
+    check(
+      'keyboard-input-isolation',
+      kb.before.count === 1 && kb.after.count === 1 && kb.before.selected === 1 && kb.after.selected === 1 &&
+        kb.before.tool === kb.after.tool && kb.afterIme === kb.before.tool,
+      kb
+    );
+
+    // BUG-05：隐藏/锁定元素不参与全选、框选、Tab；锁定元素不可剪切
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    const selA = await run("__test.addShape('rect', 100, 100, 80, 80)");
+    const selHidden = await run("__test.addShape('rect', 220, 100, 80, 80)");
+    const selLocked = await run("__test.addShape('rect', 340, 100, 80, 80)");
+    const selB = await run("__test.addShape('rect', 460, 100, 80, 80)");
+    const selFar = await run("__test.addShape('rect', 5000, 5000, 80, 80)");
+    await run('__test.setHidden(' + j(selHidden) + ', true)');
+    await run('__test.setLocked(' + j(selFar) + ', false)');
+    await run('__test.setHidden(' + j(selFar) + ', true)');
+    await run('__test.setLocked(' + j(selLocked) + ', true)');
+    const selectAllIds = await run('__test.selectAll(); __test.selectedIds()');
+    const marqueeIds = await run(
+      "(() => {const vp=document.getElementById('viewport');const r=vp.getBoundingClientRect();" +
+        "const fire=(t,x,y,b,bs)=>vp.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:r.left+x,clientY:r.top+y,button:b,buttons:bs,pointerId:41,pointerType:'mouse'}));" +
+        "__test.select([]);fire('pointerdown',50,50,0,1);fire('pointermove',600,300,0,1);fire('pointerup',600,300,0,0);return __test.selectedIds();})()"
+    );
+    const tabIds = await run(
+      "(() => {__test.select([]);document.body.tabIndex=-1;document.body.focus();const out=[];" +
+        "for(let i=0;i<6;i++){window.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));out.push(__test.selectedIds()[0]);}" +
+        "return out;})()"
+    );
+    await run("__test.select([]);document.getElementById('zoom-fit').click()");
+    const hiddenFitZoom = await run('__test.zoomPercent()');
+    await run('__test.select(' + j([selLocked]) + ')');
+    const beforeCut = await run('__test.count()');
+    await run("window.dispatchEvent(new KeyboardEvent('keydown',{key:'x',ctrlKey:true,bubbles:true,cancelable:true}))");
+    const afterCut = await run('__test.count()');
+    const selFilterOk = (ids) => ids.length === 2 && ids.includes(selA) && ids.includes(selB) && !ids.includes(selHidden) && !ids.includes(selLocked);
+    check(
+      'selection-visibility',
+      selFilterOk(selectAllIds) && selFilterOk(marqueeIds) &&
+        tabIds.every((id) => id === selA || id === selB) &&
+        hiddenFitZoom > 50 && beforeCut === afterCut,
+      { selectAllIds, marqueeIds, tabIds, fitZoom: hiddenFitZoom, beforeCut, afterCut }
+    );
+
+    // BUG-06：单击选中不创建历史快照
+    await run('__test.reset()');
+    await run('__test.setView(1, 0, 0)');
+    await run("__test.addShape('rect', 300, 140, 80, 80)");
+    await run("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}))");
+    const beforeClick = await run('__test.historyStats()');
+    const afterDown = await run(
+      "(function(){var vp=document.getElementById('viewport');var r=vp.getBoundingClientRect();vp.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,clientX:r.left+340,clientY:r.top+180,button:0,buttons:1,pointerId:42,pointerType:'mouse'}));return __test.historyStats();})()"
+    );
+    const afterClick = await run(
+      "(function(){var vp=document.getElementById('viewport');var r=vp.getBoundingClientRect();vp.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,clientX:r.left+340,clientY:r.top+180,button:0,buttons:0,pointerId:42,pointerType:'mouse'}));return __test.historyStats();})()"
+    );
+    check('history-no-clone-on-click', afterClick.clones === beforeClick.clones && afterClick.entries === beforeClick.entries, { beforeClick, afterDown, afterClick });
+
+    // BUG-03：外部修改检测 + 并发保存不损坏文件
+    await run('__test.reset()');
+    await run("__test.addText('外部修改', 100, 100)");
+    const firstSave = await run('__test.saveDetailed(' + j(tmpConflict) + ')');
+    fs.writeFileSync(tmpConflict, 'external-change', 'utf8');
+    const secondSave = await run('__test.saveDetailed(' + j(tmpConflict) + ')');
+    const concurrentText = await run('__test.serialized()');
+    const concurrent = await run(
+      "(async () => {const a=await window.api.saveDoc(" + j(tmpConcurrent) + "," + j(concurrentText) + ",false,null);" +
+        "const b=await window.api.saveDoc(" + j(tmpConcurrent) + "," + j(concurrentText) + ",false,null);" +
+        "return {a:!!a.path,b:!!b.path};})()"
+    );
+    const concurrentDoc = readDoc(tmpConcurrent);
+    check(
+      'save-conflict-and-lock',
+      firstSave && !!firstSave.path && !!firstSave.stamp && secondSave && secondSave.conflict === true &&
+        concurrent.a === true && concurrent.b === true && !!concurrentDoc && concurrentDoc.app === 'whiteboard-canvas',
+      { firstSave, secondSave, concurrent, concurrentDoc: !!concurrentDoc }
+    );
+
+    // P1：页面复制、只读模式、查找替换、编号列表
+    await run('__test.reset()');
+    await run("__test.addText('页一', 100, 100)");
+    const dupPageId = await run('__test.duplicatePage(0)');
+    const dupPages = await run('__test.pageNames()');
+    await run('__test.switchPage(1)');
+    await run("__test.addText('副本新增', 100, 200)");
+    await run('__test.switchPage(0)');
+    const dupCounts = await run('({first:__test.count(),pages:__test.pageNames().length})');
+    check('page-duplicate', !!dupPageId && dupPages.length === 2 && dupCounts.first === 1 && dupCounts.pages === 2, { dupPageId, dupPages, dupCounts });
+
+    await run('__test.reset()');
+    await run("__test.addShape('rect', 100, 100, 80, 80)");
+    await run('__test.selectAll()');
+    await run('__test.setReadOnly(true);__test.setEraserMode("object")');
+    const readOnlyState = await run(
+      "(() => {const before=__test.count();window.dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true,cancelable:true}));" +
+        "window.dispatchEvent(new KeyboardEvent('keydown',{key:'r',bubbles:true,cancelable:true}));" +
+        "return {readonly:__test.isReadOnly(),count:__test.count(),before};})()"
+    );
+    await run('__test.setReadOnly(false);__test.selectAll()');
+    await run("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true,cancelable:true}))");
+    const afterUnlockDelete = await run('__test.count()');
+    check('readonly-mode', readOnlyState.readonly === true && readOnlyState.count === readOnlyState.before && afterUnlockDelete === 0, {
+      readOnlyState,
+      afterUnlockDelete
+    });
+
+    await run('__test.reset()');
+    const replaceA = await run("__test.addText('foo one', 100, 100)");
+    const replaceB = await run("__test.addText('foo two', 100, 200)");
+    const replacedCount = await run("__test.replace('foo','bar',true)");
+    const replacedTexts = await run('__test.elements().map(e=>e.type==="text"?__test.el(e.id).text:"")');
+    check('find-replace', replacedCount === 2 && replacedTexts.includes('bar one') && replacedTexts.includes('bar two'), { replaceA, replaceB, replacedCount, replacedTexts });
+
+    await run('__test.reset()');
+    const numberedId = await run("__test.addText('第一行\\n第二行', 100, 100)");
+    await run('__test.setTextStyle(' + j(numberedId) + ", {numbered:true})");
+    const numberedEl = await run('__test.el(' + j(numberedId) + ')');
+    check('numbered-list', numberedEl && numberedEl.numbered === true, numberedEl);
+
+    // P1：PNG 倍率、选区 SVG、裁剪翻转 SVG
+    await run('__test.reset()');
+    await run('__test.setView(1,0,0)');
+    await run("__test.addShape('rect', 100, 100, 100, 80)");
+    const png1 = await run('__test.pngData({scale:1,background:true})');
+    const png3 = await run('__test.pngData({scale:3,background:true})');
+    const s1 = pngDataSize(png1);
+    const s3 = pngDataSize(png3);
+    check('png-export-scale', s3.w >= s1.w * 2.9 && s3.h >= s1.h * 2.9, { s1, s3 });
+
+    await run('__test.reset()');
+    await run("__test.addShape('rect', 100, 100, 80, 80)");
+    await run("__test.addShape('rect', 500, 100, 80, 80)");
+    const selOnly = await run('__test.select([__test.order()[0]])');
+    const selSvg = await run('__test.exportSvgTo(' + j(tmpSvgSel) + ')');
+    let selSvgOk = false;
+    try {
+      const text = fs.readFileSync(tmpSvgSel, 'utf8');
+      selSvgOk = selSvg === true && /width="160"/.test(text);
+    } catch {
+      selSvgOk = false;
+    }
+    check('svg-selection', selOnly === undefined && selSvgOk, { selOnly, selSvgOk });
+
+    const tinyCrop = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    await run('__test.reset()');
+    const cropImg = await run('__test.addImage(' + j(tinyCrop) + ', 100, 100)');
+    await run('__test.crop(' + j(cropImg) + ', {x:0,y:0,w:0.5,h:0.5}, true, false)');
+    const cropSvg = await run('__test.exportSvgTo(' + j(tmpCropSvg) + ')');
+    let cropSvgOk = false;
+    try {
+      const text = fs.readFileSync(tmpCropSvg, 'utf8');
+      cropSvgOk = cropSvg === true && text.includes('viewBox="0 0 1000 1000"') && text.includes('scale(-1 1)');
+    } catch {
+      cropSvgOk = false;
+    }
+    check('svg-crop-flip', cropSvgOk, { cropSvgOk });
+
+    // P1：对象橡皮、自定义样式、全页 ZIP
+    await run('__test.reset()');
+    const objectRect = await run("__test.addShape('rect', 100, 100, 80, 80)");
+    await run('__test.setEraserMode("object")');
+    const erasedObjects = await run('__test.eraseObjectAt(140, 140)');
+    check('object-eraser', erasedObjects === 1 && (await run('__test.count()')) === 0, { objectRect, erasedObjects });
+
+    await run('__test.reset()');
+    const styleTarget = await run("__test.addShape('rect', 100, 100, 80, 80)");
+    await run('__test.select(' + j([styleTarget]) + ')');
+    const customStyle = await run(
+      "(() => {const w=document.getElementById('custom-width');w.value='17';w.dispatchEvent(new Event('change'));" +
+        "const c=document.getElementById('custom-color');c.value='#123456';c.dispatchEvent(new Event('change'));" +
+        "return __test.el(" + j(styleTarget) + ");})()"
+    );
+    check('custom-style-inputs', customStyle && customStyle.strokeWidth === 17 && customStyle.stroke === '#123456', customStyle);
+
+    await run('__test.reset()');
+    await run("__test.addText('页一', 100, 100)");
+    await run('__test.addPage("第二页")');
+    await run('__test.switchPage(1)');
+    await run("__test.addText('页二', 100, 100)");
+    const pagesZipOk = await run('__test.exportPagesZipTo(' + j(tmpPagesZip) + ',"png")');
+    let zipEntries = 0;
+    try {
+      zipEntries = [...zip.read(fs.readFileSync(tmpPagesZip)).keys()].length;
+    } catch {
+      zipEntries = 0;
+    }
+    check('export-pages-zip', pagesZipOk === true && zipEntries === 2, { pagesZipOk, zipEntries });
+
+    // P1：旋转元素缩放、文本左/右手柄、输入焦点边界
+    await run('__test.reset()');
+    await run('__test.setView(1,0,0)');
+    const rotateId = await run("__test.addShape('rect', 100, 100, 100, 60)");
+    await run('__test.setRotation(' + j(rotateId) + ', 90)');
+    await run('__test.select(' + j([rotateId]) + ')');
+    const rotatedBefore = await run('__test.el(' + j(rotateId) + ')');
+    const rotatedBox = await run("document.getElementById('selection').style.transform");
+    const rotatedAfter = await run(
+      "(() => {const vp=document.getElementById('viewport');const h=document.querySelector('#selection .handle.se');" +
+        "if(!h)return null;const r=h.getBoundingClientRect();" +
+        "const fire=(t,x,y,b,bs,target)=>target.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:x,clientY:y,button:b,buttons:bs,pointerId:77,pointerType:'mouse',altKey:true}));" +
+        "fire('pointerdown',r.left+r.width/2,r.top+r.height/2,0,1,h);" +
+        "fire('pointermove',r.left+r.width/2+40,r.top+r.height/2+30,0,1,vp);" +
+        "fire('pointerup',r.left+r.width/2+40,r.top+r.height/2+30,0,0,vp);" +
+        "return __test.el(" + j(rotateId) + ");})()"
+    );
+    check(
+      'rotated-resize',
+      !!rotatedBefore && !!rotatedAfter && rotatedBox.includes('rotate(90deg)') &&
+        Number.isFinite(rotatedAfter.w) && Number.isFinite(rotatedAfter.h) &&
+        (Math.abs(rotatedAfter.w - rotatedBefore.w) > 0.5 || Math.abs(rotatedAfter.h - rotatedBefore.h) > 0.5),
+      { rotatedBefore, rotatedAfter, rotatedBox }
+    );
+
+    await run('__test.reset()');
+    const textHandleId = await run("__test.addText('边界文本', 100, 100)");
+    await run('__test.select(' + j([textHandleId]) + ')');
+    const textHandles = await run(
+      '({w:!!document.querySelector(\'#selection .handle.w\'),e:!!document.querySelector(\'#selection .handle.e\')})'
+    );
+    const textWidths = await run(
+      "(() => {const vp=document.getElementById('viewport');const h=document.querySelector('#selection .handle.w');" +
+        "if(!h)return null;const r=h.getBoundingClientRect();" +
+        "const fire=(t,x,y,b,bs,target)=>target.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:x,clientY:y,button:b,buttons:bs,pointerId:78,pointerType:'mouse',altKey:true}));" +
+        "const before=__test.el(" + j(textHandleId) + ");" +
+        "fire('pointerdown',r.left+r.width/2,r.top+r.height/2,0,1,h);" +
+        "fire('pointermove',r.left+r.width/2-40,r.top+r.height/2,0,1,vp);" +
+        "fire('pointerup',r.left+r.width/2-40,r.top+r.height/2,0,0,vp);" +
+        "const after=__test.el(" + j(textHandleId) + ");return {before,after};})()"
+    );
+    check(
+      'text-edit-boundaries',
+      textHandles.w && textHandles.e && textWidths && textWidths.after.w > textWidths.before.w,
+      { textHandles, textWidths }
+    );
+
+    const clipFormat = await run(
+      "(async () => {await window.api.writeClipboardElements('{\\\"app\\\":\\\"whiteboard-canvas-elements\\\",\\\"elements\\\":[]}');" +
+        "const custom=await window.api.readClipboardElements();const text=await window.api.readClipboardText();" +
+        "return {custom,text};})()"
+    );
+    check('clipboard-format', clipFormat.custom.includes('whiteboard-canvas-elements') && !clipFormat.text.includes('whiteboard-canvas-elements'), clipFormat);
+
+    const a11y = await run(
+      "(() => ({color:document.getElementById('custom-color').getAttribute('aria-label')," +
+        "width:document.getElementById('custom-width').getAttribute('aria-label')," +
+        "opacity:document.getElementById('opacity-range').getAttribute('aria-label')," +
+        "replace:document.getElementById('replace-input').getAttribute('aria-label')}))()"
+    );
+    check('a11y-controls', !!a11y.color && !!a11y.width && !!a11y.opacity && !!a11y.replace, a11y);
+
+    // P1：形状文字、标尺/参考线/网格、页面缩略图、跨页搜索
+    await run('__test.reset()');
+    const labelShapeId = await run("__test.addShape('rect', 100, 100, 160, 90)");
+    await run('__test.setShapeLabel(' + j(labelShapeId) + ", '流程图')");
+    const labelShape = await run('__test.el(' + j(labelShapeId) + ')');
+    check('shape-label', labelShape && labelShape.label === '流程图', labelShape);
+
+    await run('__test.reset()');
+    await run('__test.applySettings({gridSize:8})');
+    const gridStyle = await run("document.getElementById('viewport').style.backgroundSize");
+    const rulerState = await run(
+      "(() => {document.getElementById('ruler-btn').click();const h=document.getElementById('ruler-h');" +
+        "const r=h.getBoundingClientRect();h.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,clientX:r.left+300,clientY:r.top+8,button:0,buttons:1,pointerId:91,pointerType:'mouse'}));" +
+        "window.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,clientX:r.left+300,clientY:r.top+8,button:0,buttons:0,pointerId:91,pointerType:'mouse'}));" +
+        "return {visible:!h.hidden,guides:document.querySelectorAll('#manual-guides .manual-guide').length,canvas:h.querySelector('canvas').width};})()"
+    );
+    await run('__test.applySettings({gridSize:24})');
+    check('rulers-guides-grid', gridStyle === '8px 8px' && rulerState.visible && rulerState.guides >= 1 && rulerState.canvas > 0, { gridStyle, rulerState });
+
+    await run('__test.reset()');
+    await run("__test.addText('页一', 100, 100)");
+    await run("__test.addPage('第二页')");
+    await run('__test.switchPage(1)');
+    await run("__test.addText('页二', 100, 100)");
+    const thumbs = await run(
+      "(async () => {document.getElementById('page-thumbs-btn').click();await new Promise(r=>setTimeout(r,400));" +
+        "return document.querySelectorAll('.page-thumb').length;})()"
+    );
+    const crossSearch = await run(
+      "(() => {const input=document.getElementById('search-input');input.value='页';input.dispatchEvent(new Event('input',{bubbles:true}));" +
+        "const all=document.getElementById('search-all-pages');all.checked=true;all.dispatchEvent(new Event('change',{bubbles:true}));" +
+        "return {count:document.getElementById('search-count').textContent,page:__test.activePage()};})()"
+    );
+    check('page-thumbs-cross-search', thumbs === 2 && crossSearch.count.startsWith('1/2') && crossSearch.page === 0, { thumbs, crossSearch });
+
+    await run('__test.reset()');
+    await run('__test.setView(1,0,0)');
+    const pinchBefore = await run('__test.zoomPercent()');
+    const pinchAfter = await run(
+      "(() => {const vp=document.getElementById('viewport');const r=vp.getBoundingClientRect();" +
+        "const fire=(t,id,x,y,b,bs)=>vp.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:r.left+x,clientY:r.top+y,button:b,buttons:bs,pointerId:id,pointerType:'touch',isPrimary:id===101}));" +
+        "fire('pointerdown',101,400,300,0,1);fire('pointerdown',102,600,300,0,1);" +
+        "fire('pointermove',101,350,300,0,1);fire('pointermove',102,650,300,0,1);" +
+        "fire('pointerup',101,350,300,0,0);fire('pointerup',102,650,300,0,0);" +
+        "return {zoom:__test.zoomPercent(),count:__test.count()};})()"
+    );
+    check('pinch-pan', pinchAfter.zoom > pinchBefore + 20 && pinchAfter.count === 0, { pinchBefore, pinchAfter });
   } catch (err) {
     failures++;
     console.log('FAIL smoke-exception ' + String((err && err.message) || err));
   }
 
-  for (const file of [tmpWbc, tmpPng, tmpZip, tmpSelPng, tmpV1, tmpBad, tmpBadZip, tmpPdf, tmpSvg, tmpStyleSvg, tmpPages, tmpRepairJson, tmpRepairZip]) {
+  for (const file of [tmpWbc, tmpPng, tmpZip, tmpSelPng, tmpV1, tmpBad, tmpBadZip, tmpPdf, tmpSvg, tmpStyleSvg, tmpPages, tmpRepairJson, tmpRepairZip, tmpConflict, tmpConcurrent, tmpPagesZip, tmpSvgSel, tmpCropSvg]) {
     try {
       fs.unlinkSync(file);
     } catch {

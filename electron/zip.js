@@ -125,7 +125,48 @@ function isZip(buf) {
   return Buffer.isBuffer(buf) && buf.length >= 4 && buf.readUInt32LE(0) === 0x04034b50;
 }
 
-module.exports = { write, read, isZip, crc32 };
+function deflateRaw(data) {
+  return new Promise((resolve, reject) => {
+    zlib.deflateRaw(data, (err, out) => (err ? reject(err) : resolve(out)));
+  });
+}
+
+/** 异步写入；entry.compress 为 true 时使用 deflate，适合 doc.json 等文本 */
+async function writeAsync(entries, date = new Date()) {
+  const { time, day } = dosDateTime(date);
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  let centralSize = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8');
+    const data = entry.data;
+    const method = entry.compress ? 8 : 0;
+    const payload = method === 8 ? await deflateRaw(data) : data;
+    const crc = crc32(data);
+    const local = Buffer.concat([
+      u32(0x04034b50), u16(20), u16(0x0800), u16(method), u16(time), u16(day),
+      u32(crc), u32(payload.length), u32(data.length), u16(name.length), u16(0),
+      name, payload
+    ]);
+    locals.push(local);
+    const central = Buffer.concat([
+      u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(method), u16(time), u16(day),
+      u32(crc), u32(payload.length), u32(data.length), u16(name.length), u16(0), u16(0),
+      u16(0), u16(0), u32(0), u32(offset), name
+    ]);
+    centrals.push(central);
+    centralSize += central.length;
+    offset += local.length;
+  }
+  const centralOffset = offset;
+  const centralDir = Buffer.concat(centrals);
+  const eocd = Buffer.concat([
+    u32(0x06054b50), u16(0), u16(0), u16(entries.length), u16(entries.length),
+    u32(centralSize), u32(centralOffset), u16(0)
+  ]);
+  return Buffer.concat([...locals, centralDir, eocd]);
+}
 
 /** 扫描本地文件头，尽量读取截断的 ZIP */
 function readLenient(buf) {
@@ -156,4 +197,4 @@ function readLenient(buf) {
   return files;
 }
 
-module.exports = { write, read, isZip, crc32, readLenient };
+module.exports = { write, writeAsync, read, isZip, crc32, readLenient };

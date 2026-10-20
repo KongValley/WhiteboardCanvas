@@ -9,6 +9,24 @@ export interface MenuItem {
 const menu = document.getElementById('context-menu') as HTMLDivElement;
 let open = false;
 
+const HINTS: Record<string, string> = {
+  复制: 'Ctrl+C',
+  剪切: 'Ctrl+X',
+  粘贴: 'Ctrl+V',
+  再制: 'Ctrl+D',
+  置顶: 'Ctrl+]',
+  置底: 'Ctrl+[',
+  分组: 'Ctrl+G',
+  解组: 'Ctrl+Shift+G',
+  锁定: 'Ctrl+Shift+L',
+  隐藏: 'Ctrl+Shift+H',
+  '导出选中区域 PNG…': 'Ctrl+E',
+  '复制选区为 PNG': 'Ctrl+Shift+C',
+  删除: 'Delete',
+  全选: 'Ctrl+A',
+  适应内容: 'Ctrl+Shift+F'
+};
+
 export function hideContextMenu(): void {
   if (!open) return;
   open = false;
@@ -37,7 +55,17 @@ export function showContextMenu(items: MenuItem[], clientX: number, clientY: num
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'menu-item';
-    button.textContent = item.label;
+    const hint = HINTS[item.label];
+    if (hint) {
+      const text = document.createElement('span');
+      text.textContent = item.label;
+      const key = document.createElement('span');
+      key.className = 'menu-hint';
+      key.textContent = hint;
+      button.append(text, key);
+    } else {
+      button.textContent = item.label;
+    }
     button.disabled = !!item.disabled;
     button.setAttribute('role', 'menuitem');
     button.addEventListener('click', () => {

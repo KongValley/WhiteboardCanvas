@@ -1,7 +1,7 @@
 {
   "name": "whiteboard-canvas",
   "productName": "WhiteboardCanvas",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "Win7 32-bit whiteboard canvas",
   "license": "GPL-3.0-or-later",
@@ -12,9 +12,12 @@
     "start": "npm run build && electron .",
     "smoke": "npm run build && electron . --smoke",
     "dist": "node -e \"require('fs').rmSync('release',{recursive:true,force:true})\" && npm run build && electron-builder --win zip --ia32 --publish never",
-    "test": "tsc -p tsconfig.test.json && node --test test/model.test.cjs test/state.test.cjs test/zip.test.cjs",
+    "test": "tsc -p tsconfig.test.json && node --test test/model.test.cjs test/state.test.cjs test/zip.test.cjs test/store.test.cjs test/robust.test.cjs",
     "e2e": "node scripts/e2e.js",
-    "bench": "node scripts/bench.js"
+    "visual": "node scripts/visual.js",
+    "multi-window": "node scripts/multi-window.js",
+    "bench": "node scripts/bench.js",
+    "probe": "node scripts/probe.js"
   },
   "devDependencies": {
     "electron": "22.3.27",

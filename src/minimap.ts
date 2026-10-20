@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { bounds, boundsUnion } from './model';
+import { bounds, boundsUnion, visibleElements } from './model';
 import { state } from './state';
 import { setZoomAtWorld, view, viewport, worldViewRect } from './view';
 
@@ -10,14 +10,34 @@ const toggle = document.getElementById('minimap-toggle') as HTMLButtonElement;
 
 const WIDTH = 180;
 const HEIGHT = 120;
+/** 小地图重绘间隔（毫秒）：弱机上限约 8fps，避免平移时与主画布抢帧 */
+const MIN_INTERVAL = 120;
+/** 低配模式下的重绘间隔（约 3fps） */
+const LOW_SPEC_INTERVAL = 320;
 let raf = 0;
+let timer = 0;
+let lastDraw = 0;
 let collapsing = localStorage.getItem('wbc-minimap-collapsed') === '1';
 let lastRect = { x: 0, y: 0, w: 1, h: 1, scale: 1, ox: 0, oy: 0 };
 
+function minInterval(): number {
+  return state.settings.lowSpec ? LOW_SPEC_INTERVAL : MIN_INTERVAL;
+}
+
 export function requestMinimap(): void {
-  if (raf) return;
+  if (state.settings.lowSpec) return;
+  if (raf || timer) return;
+  const wait = minInterval() - (performance.now() - lastDraw);
+  if (wait > 0) {
+    timer = window.setTimeout(() => {
+      timer = 0;
+      requestMinimap();
+    }, wait);
+    return;
+  }
   raf = requestAnimationFrame(() => {
     raf = 0;
+    lastDraw = performance.now();
     draw();
   });
 }
@@ -29,7 +49,7 @@ function applyCollapsed(): void {
 }
 
 function draw(): void {
-  if (body.hidden) return;
+  if (body.hidden || state.settings.lowSpec) return;
   const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
   if (canvas.width !== Math.round(WIDTH * dpr)) canvas.width = Math.round(WIDTH * dpr);
   if (canvas.height !== Math.round(HEIGHT * dpr)) canvas.height = Math.round(HEIGHT * dpr);
@@ -41,7 +61,8 @@ function draw(): void {
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
   const vr = worldViewRect(0);
-  const content = boundsUnion(state.doc.elements);
+  const visible = visibleElements(state.doc.elements);
+  const content = boundsUnion(visible);
   const left = content ? Math.min(content.x, vr.x) : vr.x;
   const top = content ? Math.min(content.y, vr.y) : vr.y;
   const right = content ? Math.max(content.x + content.w, vr.x + vr.w) : vr.x + vr.w;
@@ -57,7 +78,7 @@ function draw(): void {
   const toY = (y: number) => oy + (y - rect.y) * scale;
 
   const selected = new Set(state.selectedIds);
-  for (const el of state.doc.elements) {
+  for (const el of visible) {
     const b = bounds(el);
     const accent = selected.has(el.id);
     ctx.strokeStyle = accent ? '#2563eb' : 'rgba(71,85,105,0.75)';
@@ -97,6 +118,12 @@ function jumpTo(clientX: number, clientY: number): void {
   const wy = lastRect.y + (my - lastRect.oy) / lastRect.scale;
   setZoomAtWorld(wx, wy, view.zoom);
   requestMinimap();
+}
+
+/** 低配模式：隐藏小地图面板 */
+export function setMinimapHidden(hidden: boolean): void {
+  box.hidden = hidden;
+  if (!hidden) requestMinimap();
 }
 
 export function installMinimap(): void {

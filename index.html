@@ -13,6 +13,7 @@
     <select id="page-select" aria-label="页面"></select>
     <button id="page-add" title="新建页面">＋</button>
     <button id="page-more" title="页面操作">…</button>
+    <button id="page-thumbs-btn" title="页面缩略图">缩略</button>
   </div>
   <div id="status"><span id="status-msg" aria-live="polite"></span><span id="status-info"></span></div>
   <div id="zoombar">
@@ -22,6 +23,7 @@
     <button id="zoom-in" title="放大">+</button>
     <button id="zoom-fit">适应</button>
     <button id="panel-btn" title="图层面板">图层</button>
+    <button id="ruler-btn" title="标尺">标尺</button>
     <button id="help-btn" title="快捷键 (F1)">?</button>
   </div>
 </div>
@@ -31,12 +33,20 @@
   <div id="selection" hidden></div>
   <div id="eraser-ring" hidden></div>
   <div id="hint">双击画布输入文字，或选择左侧工具开始</div>
+  <div id="ruler-h" hidden><canvas id="ruler-h-canvas" height="18"></canvas></div>
+  <div id="ruler-v" hidden><canvas id="ruler-v-canvas" width="18"></canvas></div>
+  <div id="manual-guides" hidden></div>
   <div id="searchbar" hidden>
     <input id="search-input" type="search" placeholder="搜索文字 / 标签" aria-label="搜索画布">
+    <label class="search-all"><input id="search-all-pages" type="checkbox"> 所有页</label>
     <span id="search-count">0/0</span>
+    <input id="replace-input" type="search" placeholder="替换为" aria-label="替换为">
+    <button id="replace-one" title="替换当前">替换</button>
+    <button id="replace-all" title="全部替换">全部</button>
     <button id="search-close" title="关闭">×</button>
   </div>
 </div>
+<div id="page-thumbs" hidden></div>
 <div id="toolbar">
   <button data-tool="select" title="选择 (V)">选择</button>
   <button data-tool="lasso" title="套索 (Q)">套索</button>
@@ -53,6 +63,10 @@
   <button data-tool="poly" data-shape="diamond" title="菱形 (2)">菱形</button>
   <button data-tool="poly" data-shape="star" title="五角星 (3)">星形</button>
   <button data-tool="poly" data-shape="roundrect" title="圆角矩形 (4)">圆角</button>
+  <button data-tool="poly" data-shape="hexagon" title="六边形 (5)">六边</button>
+  <button data-tool="poly" data-shape="cylinder" title="圆柱 (6)">圆柱</button>
+  <button data-tool="poly" data-shape="cloud" title="云 (7)">云</button>
+  <button data-tool="poly" data-shape="lane" title="泳道 (8)">泳道</button>
   <button id="pick-image" title="插入图片 (I)">图片</button>
 </div>
 <div id="palette" hidden>
@@ -60,6 +74,7 @@
   <div class="row" data-row="fill" hidden></div>
   <div class="row" data-row="width"></div>
   <div class="row" data-row="dash"></div>
+  <div class="row" data-row="eraser-mode" hidden></div>
   <div class="row" data-row="opacity"></div>
   <div class="row" data-row="size"></div>
   <div class="row" data-row="style"></div>
@@ -69,6 +84,15 @@
   <button id="minimap-toggle" title="折叠/展开小地图" aria-expanded="true">−</button>
   <div id="minimap-body">
     <canvas id="minimap-canvas" width="180" height="120"></canvas>
+  </div>
+</div>
+<div id="present-info" hidden></div>
+<div id="present-laser" hidden></div>
+<div id="present-black" hidden></div>
+<div id="progress" hidden>
+  <div class="progress-panel">
+    <span id="progress-text">正在处理…</span>
+    <button id="progress-cancel">取消</button>
   </div>
 </div>
 <div id="context-menu" role="menu" hidden></div>
@@ -103,6 +127,17 @@
     <button id="help-close">关闭</button>
   </div>
 </div>
+<div id="onboarding" hidden>
+  <div class="help-panel onboarding-panel" role="dialog" aria-modal="true" aria-label="快速上手">
+    <h2>快速上手</h2>
+    <ol>
+      <li><strong>画</strong>：选择画笔/形状/文字，在画布上直接绘制。</li>
+      <li><strong>选</strong>：用选择/套索/框选，拖动、缩放、旋转、对齐。</li>
+      <li><strong>存</strong>：Ctrl+S 保存 `.wbc`；自动恢复与备份在“文件”菜单。</li>
+    </ol>
+    <div class="settings-actions"><button id="onboarding-close">开始使用</button></div>
+  </div>
+</div>
 <div id="settings" hidden>
   <div class="help-panel settings-panel" role="dialog" aria-modal="true" aria-label="设置">
     <h2>设置</h2>
@@ -119,12 +154,23 @@
     <label class="setting-row setting-check">
       <input id="set-gpu" type="checkbox"> 禁用硬件加速（重启生效）
     </label>
+    <label class="setting-row setting-check">
+      <input id="set-low-spec" type="checkbox"> 低配模式（关闭小地图与标尺，老电脑更流畅）
+    </label>
     <label class="setting-row">默认背景
       <select id="set-background">
         <option value="dots">点阵</option>
         <option value="grid">网格</option>
         <option value="plain">纯白</option>
         <option value="cream">米色</option>
+      </select>
+    </label>
+    <label class="setting-row">网格大小
+      <select id="set-grid-size">
+        <option value="8">8 px</option>
+        <option value="16">16 px</option>
+        <option value="24">24 px</option>
+        <option value="32">32 px</option>
       </select>
     </label>
     <label class="setting-row">主题
@@ -141,6 +187,18 @@
     </label>
     <label class="setting-row setting-check">
       <input id="set-export-bg" type="checkbox"> PNG/PDF 导出包含背景
+    </label>
+    <label class="setting-row">打印纸张
+      <select id="set-print-size">
+        <option value="A4">A4</option>
+        <option value="Letter">Letter</option>
+      </select>
+    </label>
+    <label class="setting-row">打印方向
+      <select id="set-print-orientation">
+        <option value="landscape">横向</option>
+        <option value="portrait">纵向</option>
+      </select>
     </label>
     <div id="shortcut-list" class="shortcut-list"></div>
     <div class="setting-row setting-assoc">

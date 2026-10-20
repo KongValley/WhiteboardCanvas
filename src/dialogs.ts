@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import { uiText } from './ui-text';
+
 export interface Field {
   key: string;
   label: string;
@@ -19,14 +21,14 @@ export function openForm(title: string, fields: Field[], okLabel = '确定'): Pr
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-modal', 'true');
     const h = document.createElement('h2');
-    h.textContent = title;
+    h.textContent = uiText(title);
     panel.appendChild(h);
     const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
     for (const field of fields) {
       const row = document.createElement('label');
       row.className = 'setting-row';
       const label = document.createElement('span');
-      label.textContent = field.label;
+      label.textContent = uiText(field.label);
       row.appendChild(label);
       let input: HTMLInputElement | HTMLSelectElement;
       if (field.type === 'select') {
@@ -34,7 +36,7 @@ export function openForm(title: string, fields: Field[], okLabel = '确定'): Pr
         for (const option of field.options || []) {
           const opt = document.createElement('option');
           opt.value = option.value;
-          opt.textContent = option.label;
+          opt.textContent = uiText(option.label);
           select.appendChild(opt);
         }
         select.value = String(field.value);
@@ -56,9 +58,9 @@ export function openForm(title: string, fields: Field[], okLabel = '确定'): Pr
     const actions = document.createElement('div');
     actions.className = 'settings-actions';
     const cancel = document.createElement('button');
-    cancel.textContent = '取消';
+    cancel.textContent = uiText('取消');
     const ok = document.createElement('button');
-    ok.textContent = okLabel;
+    ok.textContent = uiText(okLabel);
     actions.append(cancel, ok);
     panel.appendChild(actions);
     overlay.appendChild(panel);

@@ -65,7 +65,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'failed to create release' }
           }
 
-      - name: Upload ZIP
+      - name: Upload ZIP and checksum
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -73,8 +73,10 @@ jobs:
         run: |
           $zip = Get-ChildItem release/*.zip | Select-Object -First 1
           if (-not $zip) { throw 'ZIP not found' }
-          gh release upload $env:TAG $zip.FullName --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'failed to upload ZIP' }
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($zip.Name)" | Out-File -FilePath release/SHA256SUMS.txt -Encoding ascii
+          gh release upload $env:TAG $zip.FullName release/SHA256SUMS.txt --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'failed to upload release assets' }
 
       - name: Publish release
         shell: pwsh

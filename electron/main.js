@@ -26,6 +26,7 @@ const MAX_IMAGE_URL = 300 * 1024 * 1024;
 
 let primary = null;
 const winStates = new Map();
+const saveLocks = new Map();
 
 function activeWin() {
   return BrowserWindow.getFocusedWindow() || primary;
@@ -60,8 +61,19 @@ process.on('unhandledRejection', (reason) => {
   store.log('error', '主进程未处理拒绝：' + String((reason && reason.stack) || reason));
 });
 let settings = store.loadSettings();
-const startupState = { recovery: null, openPath: null };
+const startupState = { openPath: null };
 if (settings.disableGpu || process.argv.includes('--disable-gpu')) app.disableHardwareAcceleration();
+
+// 无独显/核显不可用的老机器：让 Chromium 直接走软件光栅化，
+// 避免 GPU 进程反复崩溃或合成器超时（表现为窗口黑屏/整体卡顿）。
+if (process.argv.includes('--software-render') || settings.lowSpec) {
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('in-process-gpu');
+  app.commandLine.appendSwitch('disable-partial-raster');
+  app.commandLine.appendSwitch('disable-accelerated-2d-canvas');
+  app.disableHardwareAcceleration();
+}
 
 function errText(err) {
   return String((err && err.message) || err);
@@ -107,7 +119,23 @@ function mimeForExt(ext) {
   return map[String(ext).toLowerCase()] || 'image/png';
 }
 
+const ASSET_CACHE_BYTES = 128 * 1024 * 1024;
 const assetCache = new Map();
+let assetCacheBytes = 0;
+
+function touchAssetCache(key, value) {
+  const old = assetCache.get(key);
+  if (old) assetCacheBytes -= old.data.length;
+  assetCache.delete(key);
+  assetCache.set(key, value);
+  assetCacheBytes += value.data.length;
+  while (assetCacheBytes > ASSET_CACHE_BYTES && assetCache.size > 1) {
+    const first = assetCache.keys().next().value;
+    const entry = assetCache.get(first);
+    if (entry) assetCacheBytes -= entry.data.length;
+    assetCache.delete(first);
+  }
+}
 
 function docElementLists(doc) {
   if (Array.isArray(doc.pages)) {
@@ -118,7 +146,7 @@ function docElementLists(doc) {
 }
 
 /** v3：doc.json + assets/（按内容哈希去重；同一图片跨保存复用已解码数据） */
-function textToZip(text) {
+async function textToZip(text) {
   const doc = JSON.parse(text);
   const lists = doc && doc.app === 'whiteboard-canvas' ? docElementLists(doc) : null;
   if (!lists) throw new Error('文档格式不正确');
@@ -133,6 +161,7 @@ function textToZip(text) {
       const cached = assetCache.get(key);
       if (cached) {
         assets.set(cached.name, cached.data);
+        touchAssetCache(key, cached);
         el.src = 'asset:' + cached.name.slice(7);
         continue;
       }
@@ -140,18 +169,18 @@ function textToZip(text) {
       const hash = crypto.createHash('sha1').update(data).digest('hex').slice(0, 20);
       const name = `assets/${hash}.${extForMime(match[1])}`;
       assets.set(name, data);
-      assetCache.set(key, { name, data });
+      touchAssetCache(key, { name, data });
       el.src = 'asset:' + name.slice(7);
     }
   }
   const docBuf = Buffer.from(JSON.stringify(doc), 'utf8');
-  const entries = [{ name: 'doc.json', data: docBuf }];
+  const entries = [{ name: 'doc.json', data: docBuf, compress: true }];
   for (const [name, data] of assets) entries.push({ name, data });
-  return { buffer: zip.write(entries), jsonSize: docBuf.length, assets: assets.size };
+  return { buffer: await zip.writeAsync(entries), jsonSize: docBuf.length, assets: assets.size };
 }
 
 /** v3 容器 → 内联 data URL 的 JSON 文本 */
-function zipToText(buffer, filePath) {
+function zipToText(buffer, filePath, report = []) {
   const files = zip.read(buffer);
   const docBuf = files.get('doc.json');
   if (!docBuf) throw new Error('文件缺少 doc.json');
@@ -169,6 +198,7 @@ function zipToText(buffer, filePath) {
         const data = files.get(name);
         if (!data) {
           store.log('warn', `缺少图片资源 ${name}（${filePath}），已跳过该元素`);
+          report.push(`缺少图片资源：${name}，已跳过该图片`);
           continue;
         }
         el.src = `data:${mimeForExt(name.split('.').pop())};base64,${data.toString('base64')}`;
@@ -341,6 +371,37 @@ function checkWin7Compat() {
   } else {
     store.log('info', 'Win7 兼容检查通过：' + release + ' SP1 + Platform Update');
   }
+  suggestLowSpec();
+}
+
+/** Win7 老机器：首次启动时提示开启低配模式（可随时在设置里修改） */
+function suggestLowSpec() {
+  const ps = store.loadSettings();
+  if (ps.lowSpec) return;
+  const marker = path.join(app.getPath('userData'), 'low-spec-prompted.txt');
+  try {
+    if (fs.existsSync(marker)) return;
+    fs.writeFileSync(marker, String(Date.now()), 'utf8');
+  } catch {
+    /* 无法写入标记则不提示 */
+    return;
+  }
+  const en = ps.language === 'en';
+  const choice = dialog.showMessageBoxSync({
+    type: 'info',
+    title: en ? 'Windows 7' : 'Windows 7',
+    message: en ? 'Enable low-spec mode?' : '是否开启低配模式？',
+    detail: en
+      ? 'Low-spec mode hides the minimap and rulers to reduce CPU usage on older computers.\nYou can change this later in Settings.'
+      : '低配模式会隐藏小地图与标尺，明显降低老旧电脑的 CPU 占用。\n之后仍可在「设置」中修改。',
+    buttons: [en ? 'Enable' : '开启', en ? 'Later' : '暂不'],
+    defaultId: 0,
+    cancelId: 1
+  });
+  if (choice === 0) {
+    store.saveSettings({ lowSpec: true });
+    store.log('info', '已开启低配模式');
+  }
 }
 
 function buildMenu() {
@@ -381,29 +442,56 @@ function buildMenu() {
         { label: '导出 SVG…', click: () => sendMenu('export-svg') },
         { label: '导出 PDF…', click: () => sendMenu('export-pdf') },
         { label: '导出所有页面 PDF…', click: () => sendMenu('export-pages-pdf') },
+        { label: '导出所有页面 PNG ZIP…', click: () => sendMenu('export-pages-png-zip') },
+        { label: '导出所有页面 SVG ZIP…', click: () => sendMenu('export-pages-svg-zip') },
         { label: '打印…', accelerator: 'CmdOrCtrl+P', click: () => sendMenu('print') },
         { type: 'separator' },
-        {
-          label: '页面',
-          submenu: [
-            { label: '新建页面', click: () => sendMenu('page-new') },
-            { label: '重命名页面…', click: () => sendMenu('page-rename') },
-            { label: '上移页面', click: () => sendMenu('page-up') },
-            { label: '下移页面', click: () => sendMenu('page-down') },
-            { label: '删除当前页面', click: () => sendMenu('page-delete') }
-          ]
-        },
-        {
-          label: '查看',
-          submenu: [
-            { label: '图层面板', click: () => sendMenu('toggle-panels') },
-            { label: '搜索画布', click: () => sendMenu('search') },
-            { label: '演示模式', click: () => sendMenu('present') }
-          ]
-        },
-        { type: 'separator' },
+        { label: '保存当前页为模板…', click: () => sendMenu('save-template') },
         { label: '设置…', click: () => sendMenu('settings') },
         { label: '退出', role: 'quit' }
+      ]
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { label: '撤销', click: () => sendMenu('undo') },
+        { label: '重做', click: () => sendMenu('redo') },
+        { type: 'separator' },
+        { label: '剪切', click: () => sendMenu('cut') },
+        { label: '复制', click: () => sendMenu('copy') },
+        { label: '粘贴', click: () => sendMenu('paste') },
+        { label: '删除', click: () => sendMenu('delete') },
+        { label: '全选', click: () => sendMenu('select-all') }
+      ]
+    },
+    {
+      label: '视图',
+      submenu: [
+        { label: '图层面板', click: () => sendMenu('toggle-panels') },
+        { label: '搜索画布', click: () => sendMenu('search') },
+        { label: '标尺', click: () => sendMenu('toggle-rulers') },
+        { label: '页面缩略图', click: () => sendMenu('toggle-page-thumbs') },
+        { label: '只读模式', click: () => sendMenu('toggle-readonly') },
+        { label: '演示模式', click: () => sendMenu('present') },
+        { type: 'separator' },
+        { label: '放大', click: () => sendMenu('zoom-in') },
+        { label: '缩小', click: () => sendMenu('zoom-out') },
+        { label: '适应内容', click: () => sendMenu('zoom-fit') }
+      ]
+    },
+    {
+      label: '页面',
+      submenu: [
+        { label: '新建页面', click: () => sendMenu('page-new') },
+        { label: '复制当前页面', click: () => sendMenu('page-duplicate') },
+        { label: '重命名页面…', click: () => sendMenu('page-rename') },
+        { label: '上移页面', click: () => sendMenu('page-up') },
+        { label: '下移页面', click: () => sendMenu('page-down') },
+        { type: 'separator' },
+        { label: '删除当前页面', click: () => sendMenu('page-delete') },
+        { label: '导出所有页面 PDF…', click: () => sendMenu('export-pages-pdf') },
+        { label: '导出所有页面 PNG ZIP…', click: () => sendMenu('export-pages-png-zip') },
+        { label: '导出所有页面 SVG ZIP…', click: () => sendMenu('export-pages-svg-zip') }
       ]
     },
     {
@@ -418,6 +506,19 @@ function buildMenu() {
   const lang = store.loadSettings().language;
   const enMenu = {
     '文件': 'File',
+    '编辑': 'Edit',
+    '视图': 'View',
+    '撤销': 'Undo',
+    '重做': 'Redo',
+    '剪切': 'Cut',
+    '复制': 'Copy',
+    '粘贴': 'Paste',
+    '删除': 'Delete',
+    '全选': 'Select all',
+    '放大': 'Zoom in',
+    '缩小': 'Zoom out',
+    '适应内容': 'Fit content',
+    '检查更新…': 'Check for updates…',
     '新建': 'New',
     '打开…': 'Open…',
     '最近文件': 'Recent files',
@@ -434,9 +535,12 @@ function buildMenu() {
     '导出 SVG…': 'Export SVG…',
     '导出 PDF…': 'Export PDF…',
     '导出所有页面 PDF…': 'Export all pages as PDF…',
+    '导出所有页面 PNG ZIP…': 'Export all pages as PNG ZIP…',
+    '导出所有页面 SVG ZIP…': 'Export all pages as SVG ZIP…',
     '打印…': 'Print…',
     '页面': 'Page',
     '新建页面': 'New page',
+    '复制当前页面': 'Duplicate current page',
     '重命名页面…': 'Rename page…',
     '上移页面': 'Move page up',
     '下移页面': 'Move page down',
@@ -444,7 +548,11 @@ function buildMenu() {
     '查看': 'View',
     '图层面板': 'Layers panel',
     '搜索画布': 'Search canvas',
+    '标尺': 'Rulers',
+    '页面缩略图': 'Page thumbnails',
+    '只读模式': 'Read-only mode',
     '演示模式': 'Presentation mode',
+    '保存当前页为模板…': 'Save current page as template…',
     '设置…': 'Settings…',
     '退出': 'Quit',
     '帮助': 'Help',
@@ -484,7 +592,7 @@ async function showAbout() {
   });
 }
 
-function createWindow(filePath) {
+function createWindow(filePath, recoveryKey) {
   const opts = {
     width: 1280,
     height: 800,
@@ -511,7 +619,13 @@ function createWindow(filePath) {
   const w = new BrowserWindow(opts);
   if (!primary) primary = w;
   const webContentsId = w.webContents.id;
-  winStates.set(webContentsId, { win: w, dirty: false, allowClose: false, closePending: false });
+  winStates.set(webContentsId, {
+    win: w,
+    dirty: false,
+    allowClose: false,
+    closePending: false,
+    recoveryKey: typeof recoveryKey === 'string' ? recoveryKey : null
+  });
 
   if (isSmoke) {
     w.webContents.once('did-finish-load', () => {
@@ -534,7 +648,7 @@ function createWindow(filePath) {
     if (st.closePending) return;
     const behavior = store.loadSettings().closeBehavior;
     if (behavior === 'discard') {
-      if (w === primary) store.clearRecovery();
+      if (st.recoveryKey) store.clearRecovery(st.recoveryKey);
       st.allowClose = true;
       w.close();
       return;
@@ -550,7 +664,7 @@ function createWindow(filePath) {
       });
       if (choice === 2) return;
       if (choice === 1) {
-        if (w === primary) store.clearRecovery();
+        if (st.recoveryKey) store.clearRecovery(st.recoveryKey);
         st.allowClose = true;
         w.close();
         return;
@@ -720,9 +834,11 @@ async function readDocumentFile(target) {
     if (choice !== 0) return { canceled: true };
   }
   const buffer = await fs.promises.readFile(target);
+  const stamp = { mtimeMs: stat.mtimeMs, size: stat.size };
+  const report = [];
   try {
     if (isZipFile(buffer)) {
-      return { path: target, text: zipToText(buffer, target) };
+      return { path: target, text: zipToText(buffer, target, report), stamp, report };
     }
     let text = buffer.toString('utf8').replace(/^\uFEFF/, '');
     const parsed = JSON.parse(text);
@@ -738,32 +854,115 @@ async function readDocumentFile(target) {
       await store.backupBuffer(buffer, target);
       parsed.version = 3;
       text = JSON.stringify(parsed);
+      report.push(`已从 v${version} 迁移为 v3，原文件已备份`);
       store.log('info', `已将 v${version} JSON 文件迁移为 v3：${target}`);
     }
-    return { path: target, text };
+    return { path: target, text, stamp, report };
   } catch (err) {
     const repaired = repairDocumentBuffer(buffer, target);
     if (repaired) {
-      return { path: target, text: JSON.stringify(repaired), repaired: true };
+      const count = Array.isArray(repaired.pages) ? repaired.pages.reduce((sum, page) => sum + (page.elements ? page.elements.length : 0), 0) : 0;
+      report.push(`文件损坏，已尽力恢复 ${count} 个元素；请另存为`);
+      return { path: target, text: JSON.stringify(repaired), repaired: true, stamp, report };
     }
     throw err;
   }
 }
 
+function asStamp(value) {
+  if (!value || typeof value !== 'object') return null;
+  const mtimeMs = Number(value.mtimeMs);
+  const size = Number(value.size);
+  if (!Number.isFinite(mtimeMs) || !Number.isFinite(size) || mtimeMs < 0 || size < 0) return null;
+  return { mtimeMs, size };
+}
+
+function sameStamp(a, b) {
+  if (!a || !b) return false;
+  return a.size === b.size && Math.abs(a.mtimeMs - b.mtimeMs) < 0.5;
+}
+
+async function fileStamp(target) {
+  try {
+    const stat = await fs.promises.stat(target);
+    if (!stat.isFile()) return null;
+    return { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function lockKeyFor(target) {
+  try {
+    return fs.realpathSync.native(target).toLowerCase();
+  } catch {
+    return path.resolve(target).toLowerCase();
+  }
+}
+
+function withPathLock(key, task) {
+  const prev = saveLocks.get(key) || Promise.resolve();
+  const run = prev.catch(() => {}).then(task);
+  const tail = run.catch(() => {});
+  saveLocks.set(key, tail);
+  tail.finally(() => {
+    if (saveLocks.get(key) === tail) saveLocks.delete(key);
+  });
+  return run;
+}
+
 async function saveDocument(args) {
+  const rawPath = args.path === null || args.path === undefined ? null : asString(args.path, 4096, 'path');
+  if (!rawPath) return saveDocumentUnlocked(args);
+  return withPathLock(lockKeyFor(rawPath), () => saveDocumentUnlocked(args));
+}
+
+async function saveDocumentUnlocked(args) {
   const given = args.path === null || args.path === undefined ? null : asString(args.path, 4096, 'path');
   let text = asString(args.text, MAX_DOC_TEXT, 'text');
   const silent = args.silent === undefined ? false : asBool(args.silent, 'silent');
+  const expected = asStamp(args.expected);
   let target = given;
   if (!target) {
     if (silent) return { error: '未指定保存路径' };
     target = await chooseSavePath('保存白板', '未命名.wbc', 'wbc');
     if (!target) return { canceled: true };
-  } else if (!silent) {
-    try {
-      if (fs.statSync(target).isFile()) await store.backupFile(target);
-    } catch {
-      /* 新文件无备份 */
+    return withPathLock(lockKeyFor(target), () => saveDocumentUnlocked({ ...args, path: target }));
+  }
+
+  // 外部修改检测：打开/上次保存后文件被其他程序改过，先让用户决定
+  if (expected) {
+    const current = await fileStamp(target);
+    if (!sameStamp(current, expected)) {
+      if (silent) return { conflict: true, stamp: current, error: '文件已被外部修改' };
+      if (isTest) return { conflict: true, stamp: current, path: target };
+      const buttons = current ? ['重新载入', '另存为…', '覆盖', '取消'] : ['另存为…', '覆盖', '取消'];
+      const reloadIndex = current ? 0 : -1;
+      const saveAsIndex = current ? 1 : 0;
+      const cancelIndex = current ? 3 : 2;
+      const choice = dialog.showMessageBoxSync(activeWin(), {
+        type: 'warning',
+        buttons,
+        defaultId: cancelIndex,
+        cancelId: cancelIndex,
+        message: '文件已被外部修改',
+        detail:
+          (current
+            ? '磁盘上的文件与打开时不一致：' + target + '\n请选择重新载入外部版本、另存为或覆盖。'
+            : '磁盘上的文件已被删除或移动：' + target + '\n请选择另存为或覆盖。')
+      });
+      if (choice === cancelIndex) return { canceled: true };
+      if (choice === reloadIndex) {
+        const loaded = await readDocumentFile(target);
+        if (loaded.error || typeof loaded.text !== 'string') return { error: loaded.error || '重新载入失败' };
+        return { reload: true, path: target, text: loaded.text, stamp: loaded.stamp || (await fileStamp(target)) };
+      }
+      if (choice === saveAsIndex) {
+        const alt = await chooseSavePath('另存为白板', path.basename(target), 'wbc');
+        if (!alt) return { canceled: true };
+        target = alt;
+      }
+      /* overwrite：继续写入 */
     }
   }
 
@@ -793,24 +992,40 @@ async function saveDocument(args) {
     }
   }
 
+  // 覆盖前先备份磁盘上的版本（包含被外部修改的情况）
+  if (!silent) {
+    try {
+      if (fs.statSync(target).isFile()) await store.backupFile(target);
+    } catch {
+      /* 新文件无备份 */
+    }
+  }
+
   let payload;
   try {
-    payload = textToZip(text).buffer;
+    payload = (await textToZip(text)).buffer;
   } catch (err) {
     return { error: '文档序列化失败：' + errText(err) };
   }
 
   for (;;) {
-    const tmp = target + '.tmp-' + process.pid;
+    const tmp = target + '.tmp-' + process.pid + '-' + crypto.randomBytes(6).toString('hex');
     try {
-      await fs.promises.writeFile(tmp, payload);
+      const handle = await fs.promises.open(tmp, 'w');
+      try {
+        await handle.writeFile(payload);
+        // 部分网络盘/文件系统不支持 fsync，失败不影响原子改名
+        await handle.sync().catch(() => {});
+      } finally {
+        await handle.close();
+      }
       await fs.promises.rename(tmp, target);
-      store.clearRecovery();
+      const stamp = await fileStamp(target);
       store.addRecent(target);
       store.addSession(target);
       store.log('info', '保存文档：' + target);
       buildMenu();
-      return { path: target };
+      return { path: target, stamp };
     } catch (err) {
       store.log('error', '保存失败：' + errText(err));
       try {
@@ -849,6 +1064,9 @@ async function handlePrintPages(dataUrls, mode, givenTarget) {
     return { error: '参数无效：图片列表' };
   }
   if (mode !== 'pdf' && mode !== 'print') return { error: '参数无效：mode' };
+  const ps = store.loadSettings();
+  const landscape = ps.printOrientation !== 'portrait';
+  const pageSize = ps.printPageSize === 'Letter' ? 'Letter' : 'A4';
   const stamp = `${process.pid}-${Date.now()}`;
   const files = [];
   const htmlPath = path.join(app.getPath('temp'), `wbc-print-${stamp}.html`);
@@ -863,15 +1081,15 @@ async function handlePrintPages(dataUrls, mode, givenTarget) {
     }
     const html =
       '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
-      '@page{size:A4 landscape;margin:8mm}html,body{margin:0;padding:0}' +
+      `@page{size:${pageSize} ${landscape ? 'landscape' : 'portrait'};margin:8mm}html,body{margin:0;padding:0}` +
       '.page{display:block;width:100%;height:100vh;object-fit:contain;page-break-after:always}' +
       '.page:last-child{page-break-after:auto}</style></head><body>' + images.join('') + '</body></html>';
     await fs.promises.writeFile(htmlPath, html, 'utf8');
     await printWin.loadFile(htmlPath);
     if (mode === 'pdf') {
       const pdf = await printWin.webContents.printToPDF({
-        landscape: true,
-        pageSize: 'A4',
+        landscape,
+        pageSize,
         printBackground: true,
         margins: { marginType: 'default' }
       });
@@ -883,7 +1101,7 @@ async function handlePrintPages(dataUrls, mode, givenTarget) {
       return { path: target };
     }
     return await new Promise((resolve) => {
-      printWin.webContents.print({ silent: false, printBackground: true, landscape: true, pageSize: 'A4' }, (success, reason) => {
+      printWin.webContents.print({ silent: false, printBackground: true, landscape, pageSize }, (success, reason) => {
         if (success) resolve({ path: '打印' });
         else if (reason === 'cancelled' || reason === 'Print job canceled') resolve({ canceled: true });
         else resolve({ error: String(reason || '打印失败') });
@@ -912,6 +1130,9 @@ async function handlePrint(dataUrl, mode, givenTarget) {
     return { error: '参数无效：dataUrl' };
   }
   if (mode !== 'pdf' && mode !== 'print') return { error: '参数无效：mode' };
+  const ps = store.loadSettings();
+  const landscape = ps.printOrientation !== 'portrait';
+  const pageSize = ps.printPageSize === 'Letter' ? 'Letter' : 'A4';
   const stamp = `${process.pid}-${Date.now()}`;
   const pngPath = path.join(app.getPath('temp'), `wbc-print-${stamp}.png`);
   const htmlPath = path.join(app.getPath('temp'), `wbc-print-${stamp}.html`);
@@ -920,15 +1141,15 @@ async function handlePrint(dataUrl, mode, givenTarget) {
     await fs.promises.writeFile(pngPath, Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64'));
     const html =
       '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
-      '@page{size:A4 landscape;margin:8mm}html,body{margin:0;width:100%;height:100%}' +
+      `@page{size:${pageSize} ${landscape ? 'landscape' : 'portrait'};margin:8mm}html,body{margin:0;width:100%;height:100%}` +
       'img{width:100%;height:100%;object-fit:contain}</style></head><body>' +
       `<img src="${pathToFileURL(pngPath).href}"></body></html>`;
     await fs.promises.writeFile(htmlPath, html, 'utf8');
     await printWin.loadFile(htmlPath);
     if (mode === 'pdf') {
       const pdf = await printWin.webContents.printToPDF({
-        landscape: true,
-        pageSize: 'A4',
+        landscape,
+        pageSize,
         printBackground: true,
         margins: { marginType: 'default' }
       });
@@ -940,7 +1161,7 @@ async function handlePrint(dataUrl, mode, givenTarget) {
       return { path: target };
     }
     return await new Promise((resolve) => {
-      printWin.webContents.print({ silent: false, printBackground: true, landscape: true, pageSize: 'A4' }, (success, reason) => {
+      printWin.webContents.print({ silent: false, printBackground: true, landscape, pageSize }, (success, reason) => {
         if (success) resolve({ path: '打印' });
         else if (reason === 'cancelled' || reason === 'Print job canceled') resolve({ canceled: true });
         else resolve({ error: String(reason || '打印失败') });
@@ -968,17 +1189,24 @@ async function handlePrint(dataUrl, mode, givenTarget) {
 }
 
 function registerIpc() {
+  if (isTest) {
+    ipcMain.handle('test:new-window', async () => {
+      createWindow();
+      return true;
+    });
+    ipcMain.handle('test:user-data', async () => app.getPath('userData'));
+  }
+
   ipcMain.handle('app:startup', async (e) => {
+    const windowState = winStates.get(e.sender.id);
     const isPrimary = primary && e.sender.id === primary.webContents.id;
+    const recovery = windowState && windowState.recoveryKey ? store.readRecovery(windowState.recoveryKey) : null;
     const state = {
       settings: isTest ? { ...DEFAULT_SETTINGS } : store.loadSettings(),
-      recovery: isPrimary ? startupState.recovery : null,
-      openPath: isPrimary ? startupState.openPath : null
+      recovery,
+      openPath: isPrimary && !recovery ? startupState.openPath : null
     };
-    if (isPrimary) {
-      startupState.recovery = null;
-      startupState.openPath = null;
-    }
+    if (isPrimary && !recovery) startupState.openPath = null;
     return state;
   });
 
@@ -1011,10 +1239,15 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('doc:save', async (_e, args) => {
+  ipcMain.handle('doc:save', async (e, args) => {
     if (!args || typeof args !== 'object') return { error: '参数无效：args' };
     try {
-      return await saveDocument(args);
+      const result = await saveDocument(args);
+      if (result.path && !result.reload && !result.conflict) {
+        const windowState = winStates.get(e.sender.id);
+        if (windowState && windowState.recoveryKey) store.clearRecovery(windowState.recoveryKey);
+      }
+      return result;
     } catch (err) {
       store.log('error', '保存失败：' + errText(err));
       return { error: errText(err) };
@@ -1041,6 +1274,31 @@ function registerIpc() {
     dialog.showErrorBox('白板画布', String(message || '未知错误').slice(0, 4000));
   });
 
+  ipcMain.handle('shell:open-external', async (_e, url) => {
+    try {
+      const target = asString(url, 2048, 'url', false);
+      if (!/^https?:\/\//i.test(target)) return { error: '仅支持 http/https' };
+      await shell.openExternal(target);
+      return { ok: true };
+    } catch (err) {
+      return { error: errText(err) };
+    }
+  });
+
+  ipcMain.handle('app:info', async (_e, title, detail) => {
+    if (isTest) {
+      store.log('info', '打开报告：' + String(title) + ' ' + String(detail).slice(0, 1000));
+      return;
+    }
+    await dialog.showMessageBox(activeWin(), {
+      type: 'info',
+      title: typeof title === 'string' ? title.slice(0, 200) : '提示',
+      message: typeof title === 'string' ? title.slice(0, 200) : '提示',
+      detail: typeof detail === 'string' ? detail.slice(0, 8000) : '',
+      buttons: ['确定']
+    });
+  });
+
   ipcMain.on('app:log', (_e, level, message) => {
     if (typeof message !== 'string') return;
     store.log(['info', 'warn', 'error'].includes(level) ? level : 'info', message.slice(0, 8000));
@@ -1062,6 +1320,21 @@ function registerIpc() {
 
   ipcMain.on('clipboard:write-text', (_e, text) => {
     clipboard.writeText(String(text || '').slice(0, 32 * 1024 * 1024));
+  });
+
+  ipcMain.on('clipboard:write-elements', (_e, text) => {
+    if (typeof text !== 'string' || text.length > 32 * 1024 * 1024) return;
+    clipboard.writeBuffer('application/x-whiteboard-canvas-elements', Buffer.from(text, 'utf8'));
+  });
+
+  ipcMain.handle('clipboard:read-elements', async () => {
+    try {
+      const buffer = clipboard.readBuffer('application/x-whiteboard-canvas-elements');
+      if (buffer && buffer.length) return buffer.toString('utf8').slice(0, 32 * 1024 * 1024);
+    } catch {
+      /* 无自定义格式 */
+    }
+    return clipboard.readText().slice(0, 32 * 1024 * 1024);
   });
 
   ipcMain.on('clipboard:write-image', (_e, dataUrl) => {
@@ -1118,19 +1391,50 @@ function registerIpc() {
     }
   });
 
-  ipcMain.on('recovery:write', (_e, text, filePath) => {
-    if (typeof text !== 'string' || typeof filePath !== 'string') return;
-    store.writeRecovery(text, filePath || null);
+  ipcMain.on('recovery:init', (e, key) => {
+    const windowState = winStates.get(e.sender.id);
+    if (!windowState) return;
+    if (typeof key === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(key)) windowState.recoveryKey = key;
   });
 
-  ipcMain.on('recovery:clear', () => store.clearRecovery());
+  ipcMain.on('recovery:write', (e, text, filePath, key, stamp) => {
+    if (typeof text !== 'string' || typeof filePath !== 'string') return;
+    const windowState = winStates.get(e.sender.id);
+    const targetKey = typeof key === 'string' && key ? key : windowState && windowState.recoveryKey;
+    if (!targetKey) return;
+    if (windowState && !windowState.recoveryKey) windowState.recoveryKey = targetKey;
+    store.writeRecovery(targetKey, text, filePath || null, stamp);
+  });
 
-  ipcMain.handle('backup:now', async (_e, text, filePath) => {
+  ipcMain.on('recovery:clear', (e, key) => {
+    const windowState = winStates.get(e.sender.id);
+    const targetKey = typeof key === 'string' && key ? key : windowState && windowState.recoveryKey;
+    if (targetKey) store.clearRecovery(targetKey);
+  });
+
+  ipcMain.handle('backup:now', async (e, text, filePath, docKey) => {
     try {
       const safeText = asString(text, MAX_DOC_TEXT, 'text');
       const safePath = typeof filePath === 'string' ? asString(filePath, 4096, 'path') : null;
-      const file = await store.backupBuffer(textToZip(safeText).buffer, safePath);
+      const windowState = winStates.get(e.sender.id);
+      const key = typeof docKey === 'string' && docKey ? docKey : windowState && windowState.recoveryKey;
+      const payload = await textToZip(safeText);
+      const file = await store.backupBuffer(payload.buffer, safePath, key);
       return file ? { path: file } : { error: '备份失败' };
+    } catch (err) {
+      return { error: errText(err) };
+    }
+  });
+
+  ipcMain.handle('backup:list', async () => store.listBackups());
+
+  ipcMain.handle('backup:delete', async (_e, target) => {
+    try {
+      const file = asString(target, 4096, 'path', false);
+      const backupsDir = path.resolve(store.dirs.backupsDir);
+      if (path.dirname(path.resolve(file)) !== backupsDir) return { error: '参数无效：路径' };
+      await fs.promises.unlink(file);
+      return { ok: true };
     } catch (err) {
       return { error: errText(err) };
     }
@@ -1164,6 +1468,31 @@ function registerIpc() {
     }
   });
 
+  ipcMain.handle('export:zip', async (_e, entries, defaultName, given) => {
+    try {
+      if (!Array.isArray(entries) || !entries.length || entries.length > 500) return { error: '参数无效：文件列表' };
+      const files = [];
+      for (const entry of entries) {
+        if (!entry || typeof entry.name !== 'string' || typeof entry.data !== 'string') return { error: '参数无效：文件项' };
+        const name = entry.name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 120);
+        const data = entry.base64
+          ? Buffer.from(entry.data.slice(entry.data.indexOf(',') + 1), 'base64')
+          : Buffer.from(entry.data, 'utf8');
+        files.push({ name, data });
+      }
+      let target = typeof given === 'string' && given ? asString(given, 4096, 'path', false) : null;
+      if (!target) {
+        target = await chooseSavePath('导出所有页面', (defaultName || '白板页面') + '.zip', 'zip');
+        if (!target) return { canceled: true };
+      }
+      await fs.promises.writeFile(target, zip.write(files));
+      store.log('info', '导出页面 ZIP：' + target);
+      return { path: target };
+    } catch (err) {
+      return { error: errText(err) };
+    }
+  });
+
   ipcMain.handle('svg:save', async (_e, svg, given) => {
     try {
       const text = asString(svg, 64 * 1024 * 1024, 'svg', false);
@@ -1189,8 +1518,39 @@ function registerIpc() {
   });
 }
 
-const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
+/**
+ * GPU 进程看门狗：核显驱动异常时 GPU 进程会反复退出，
+ * 此时自动切换到软件光栅化并提示用户，避免窗口空白或持续卡顿。
+ */
+function installGpuWatchdog() {
+  let gpuCrashes = 0;
+  let warned = false;
+  app.on('gpu-process-crashed', (_e, details) => {
+    gpuCrashes += 1;
+    store.log('error', 'GPU 进程崩溃：' + JSON.stringify(details));
+    if (gpuCrashes < 2 || warned) return;
+    warned = true;
+    const en = store.loadSettings().language === 'en';
+    store.saveSettings({ disableGpu: true });
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: en ? 'Graphics' : '显卡',
+      message: en ? 'Graphics acceleration crashed. Switch to software rendering?' : '硬件加速已崩溃，是否切换为软件渲染？',
+      detail: en
+        ? 'Your graphics driver may be outdated. Software rendering is slower but stable.\nThe app will restart.'
+        : '显卡驱动可能过旧或不稳定。软件渲染速度较慢但更稳定。\n应用将自动重启。',
+      buttons: [en ? 'Restart now' : '立即重启', en ? 'Later' : '稍后'],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (choice === 0) {
+      app.relaunch();
+      app.exit(0);
+    }
+  });
+}
+
+const gotLock = app.requestSingleInstanceLock();if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', (_e, argv) => {
@@ -1210,33 +1570,42 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     store.log('info', '应用启动 v' + app.getVersion());
     checkWin7Compat();
-    if (!isTest) {
-      const recovery = store.readRecovery();
-      if (recovery) {
-        const choice = dialog.showMessageBoxSync({
-          type: 'question',
-          buttons: ['恢复', '丢弃'],
-          defaultId: 0,
-          cancelId: 1,
-          message: '发现未保存的编辑内容',
-          detail: recovery.path ? '文件：' + recovery.path : '该内容来自上次异常退出。'
-        });
-        if (choice === 0) {
-          startupState.recovery = recovery;
-        } else {
-          store.clearRecovery();
-        }
-      }
-      if (!startupState.recovery) {
-        const launchPath = parseWbcArg(process.argv);
-        if (launchPath) startupState.openPath = launchPath;
-      }
-    }
     buildMenu();
     registerIpc();
+    installGpuWatchdog();
+    if (isTest) {
+      createWindow();
+      return;
+    }
+
+    const recoveries = store.listRecoveries();
+    let restored = 0;
+    for (const recovery of recoveries) {
+      const when = recovery.at ? new Date(recovery.at).toLocaleString() : '未知时间';
+      const choice = dialog.showMessageBoxSync({
+        type: 'question',
+        buttons: ['恢复', '丢弃'],
+        defaultId: 0,
+        cancelId: 1,
+        message: '发现未保存的编辑内容',
+        detail: (recovery.path ? '文件：' + recovery.path : '未命名文档') + '\n时间：' + when + '\n恢复后将打开独立窗口。'
+      });
+      if (choice === 0) {
+        createWindow(null, recovery.key);
+        restored += 1;
+      } else {
+        store.clearRecovery(recovery.key);
+      }
+    }
+    if (restored > 0) {
+      store.log('info', '恢复未保存窗口：' + restored);
+      return;
+    }
+
+    const launchFiles = parseWbcArgs(process.argv).slice(0, 11);
+    if (launchFiles[0]) startupState.openPath = launchFiles[0];
     createWindow();
-    const extraFiles = parseWbcArgs(process.argv).slice(1, 11);
-    for (const file of extraFiles) createWindow(file);
+    for (const file of launchFiles.slice(1)) createWindow(file);
   });
 
   app.on('window-all-closed', () => {

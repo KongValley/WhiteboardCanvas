@@ -19,6 +19,10 @@ const DICT: Record<string, Entry> = {
   'tool.diamond': ['菱形', 'Diamond'],
   'tool.star': ['五角星', 'Star'],
   'tool.roundrect': ['圆角矩形', 'Rounded rectangle'],
+  'tool.hexagon': ['六边形', 'Hexagon'],
+  'tool.cylinder': ['圆柱', 'Cylinder'],
+  'tool.cloud': ['云', 'Cloud'],
+  'tool.lane': ['泳道', 'Lane'],
   'tool.image': ['图片', 'Image'],
   hint: ['双击画布输入文字，或选择左侧工具开始', 'Double-click the canvas to type, or pick a tool'],
   'zoom.out': ['缩小', 'Zoom out'],
@@ -28,9 +32,13 @@ const DICT: Record<string, Entry> = {
   'help.open': ['快捷键 (F1)', 'Shortcuts (F1)'],
   'page.add': ['新建页面', 'New page'],
   'page.more': ['页面操作', 'Page actions'],
+  'page.thumbs': ['页面缩略图', 'Page thumbnails'],
+  'page.searchAll': ['所有页', 'All pages'],
   'page.select': ['页面', 'Page'],
   'search.placeholder': ['搜索文字 / 标签', 'Search text / labels'],
+  'search.replace': ['替换为', 'Replace with'],
   'search.close': ['关闭', 'Close'],
+  'ruler.toggle': ['标尺', 'Rulers'],
   'help.title': ['快捷键', 'Keyboard shortcuts'],
   'help.close': ['关闭', 'Close'],
   'settings.title': ['设置', 'Settings'],
@@ -40,7 +48,9 @@ const DICT: Record<string, Entry> = {
   'settings.closeSaveOpt': ['自动保存', 'Save automatically'],
   'settings.closeDiscardOpt': ['直接关闭', 'Close without saving'],
   'settings.gpu': ['禁用硬件加速（重启生效）', 'Disable hardware acceleration (restart)'],
+  'settings.lowSpec': ['低配模式（关闭小地图与标尺，老电脑更流畅）', 'Low-spec mode (hides minimap and rulers)'],
   'settings.background': ['默认背景', 'Default background'],
+  'settings.gridSize': ['网格大小', 'Grid size'],
   'bg.dots': ['点阵', 'Dots'],
   'bg.grid': ['网格', 'Grid'],
   'bg.plain': ['纯白', 'Plain white'],
@@ -65,6 +75,10 @@ const DICT: Record<string, Entry> = {
   'status.selected': ['选中', 'Selected'],
   'status.saved': ['已保存', 'Saved'],
   'status.unsaved': ['未保存', 'Unsaved'],
+  'status.saving': ['保存中', 'Saving'],
+  'status.conflict': ['保存冲突', 'Save conflict'],
+  'status.saveError': ['保存失败', 'Save failed'],
+  'status.readonly': ['只读', 'Read-only'],
   'status.autosave': ['自动保存', 'Autosave'],
   'ctx.copy': ['复制', 'Copy'],
   'ctx.cut': ['剪切', 'Cut'],
@@ -86,7 +100,8 @@ const DICT: Record<string, Entry> = {
   'ctx.distributeV': ['垂直等距分布', 'Distribute vertically'],
   'ctx.copyFormat': ['复制格式', 'Copy format'],
   'ctx.pasteFormat': ['粘贴格式', 'Paste format'],
-  'ctx.exportSelection': ['导出选中区域…', 'Export selection…'],
+  'ctx.exportSelection': ['导出选中区域 PNG…', 'Export selection PNG…'],
+  'ctx.exportSelectionSvg': ['导出选中区域 SVG…', 'Export selection SVG…'],
   'ctx.copyPng': ['复制选区为 PNG', 'Copy selection as PNG'],
   'ctx.delete': ['删除', 'Delete'],
   'ctx.newText': ['新建文字', 'New text'],
@@ -100,6 +115,7 @@ const DICT: Record<string, Entry> = {
   'ctx.replace': ['替换图片…', 'Replace image…'],
   'ctx.label': ['编辑连线标签…', 'Edit connector label…'],
   'page.new': ['新建页面', 'New page'],
+  'page.duplicate': ['复制当前页面', 'Duplicate current page'],
   'page.rename': ['重命名页面…', 'Rename page…'],
   'page.up': ['上移页面', 'Move page up'],
   'page.down': ['下移页面', 'Move page down'],
@@ -153,6 +169,10 @@ const HELP_ROWS: [string, string][] = [
   ['撤销 / 重做', 'Undo / redo'],
   ['Ctrl+S / Ctrl+O / Ctrl+N / Ctrl+E / Ctrl+P', 'Ctrl+S / Ctrl+O / Ctrl+N / Ctrl+E / Ctrl+P'],
   ['保存 / 打开 / 新建 / 导出 PNG / 打印', 'Save / open / new / export PNG / print'],
+  ['F5 / Esc', 'F5 / Esc'],
+  ['进入/退出演示模式', 'Enter / exit presentation'],
+  ['Ctrl+Shift+C / Ctrl+Shift+F', 'Ctrl+Shift+C / Ctrl+Shift+F'],
+  ['复制选区 PNG / 缩放到选中', 'Copy selection PNG / zoom to selection'],
   ['F1', 'F1'],
   ['显示或关闭本帮助', 'Toggle this help']
 ];
@@ -217,6 +237,22 @@ export function applyI18n(): void {
   setTitle('#help-btn', t('help.open'));
   setTitle('#page-add', t('page.add'));
   setTitle('#page-more', t('page.more'));
+  setTitle('#page-thumbs-btn', t('page.thumbs'));
+  setTitle('#ruler-btn', t('ruler.toggle'));
+  const searchAll = document.getElementById('search-all-pages');
+  if (searchAll) {
+    const label = searchAll.closest('label');
+    if (label) {
+      for (const node of Array.from(label.childNodes)) {
+        if (node.nodeType === Node.TEXT_NODE && (node.textContent || '').trim()) {
+          node.textContent = ' ' + t('page.searchAll');
+          break;
+        }
+      }
+    }
+  }
+  const replaceInput = document.getElementById('replace-input');
+  if (replaceInput) replaceInput.setAttribute('placeholder', t('search.replace'));
   const pageSelect = document.getElementById('page-select');
   if (pageSelect) pageSelect.setAttribute('aria-label', t('page.select'));
   const searchInput = document.getElementById('search-input');
@@ -244,8 +280,10 @@ export function applyI18n(): void {
   labelText('set-close', t('settings.closeAsk'));
   optionText('set-close', { ask: t('settings.closeAskOpt'), save: t('settings.closeSaveOpt'), discard: t('settings.closeDiscardOpt') });
   labelText('set-gpu', t('settings.gpu'));
+  labelText('set-low-spec', t('settings.lowSpec'));
   labelText('set-background', t('settings.background'));
   optionText('set-background', { dots: t('bg.dots'), grid: t('bg.grid'), plain: t('bg.plain'), cream: t('bg.cream') });
+  labelText('set-grid-size', t('settings.gridSize'));
   labelText('set-theme', t('settings.theme'));
   optionText('set-theme', { light: t('theme.light'), dark: t('theme.dark') });
   labelText('set-language', t('settings.language'));

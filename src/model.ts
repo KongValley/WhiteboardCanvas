@@ -13,7 +13,7 @@ export type Tool =
   | 'arrow'
   | 'line'
   | 'poly';
-export type PolyKind = 'triangle' | 'diamond' | 'star' | 'roundrect';
+export type PolyKind = 'triangle' | 'diamond' | 'star' | 'roundrect' | 'hexagon' | 'cylinder' | 'cloud' | 'lane';
 export type ElType = 'text' | 'image' | 'ink' | 'rect' | 'ellipse' | 'arrow' | 'poly';
 export type Align = 'left' | 'center' | 'right';
 export type Dash = 'solid' | 'dash' | 'dot';
@@ -54,9 +54,11 @@ export interface TextEl extends Base {
   underline?: boolean;
   strike?: boolean;
   bullets?: boolean;
+  numbered?: boolean;
   align?: Align;
   sticky?: boolean;
   stickyColor?: string;
+  link?: string;
 }
 
 export interface ImageEl extends Base {
@@ -96,6 +98,7 @@ export interface RectEl extends Base {
   fill: string;
   dash?: Dash;
   radius?: number;
+  label?: string;
 }
 
 export interface EllipseEl extends Base {
@@ -108,6 +111,7 @@ export interface EllipseEl extends Base {
   strokeWidth: number;
   fill: string;
   dash?: Dash;
+  label?: string;
 }
 
 export interface ArrowEl extends Base {
@@ -124,6 +128,8 @@ export interface ArrowEl extends Base {
   label?: string;
   fromId?: string;
   toId?: string;
+  routing?: 'straight' | 'orthogonal';
+  startHead?: boolean;
 }
 
 export interface PolyEl extends Base {
@@ -138,12 +144,35 @@ export interface PolyEl extends Base {
   fill: string;
   dash?: Dash;
   radius?: number;
+  label?: string;
 }
 
 export type El = TextEl | ImageEl | InkEl | RectEl | EllipseEl | ArrowEl | PolyEl;
 
 export function uid(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+/**
+ * 元素快照：只复制一层可变字段。
+ * 图片 data URL（可达数 MB）是字符串不可变，共享引用即可，无需复制内容；
+ * 笔迹点与裁剪框为可变对象，需要深拷贝。
+ */
+export function cloneEl(el: El): El {
+  const copy = { ...el } as El;
+  if (el.type === 'ink') {
+    (copy as InkEl).points = el.points.map(([x, y]) => [x, y] as Pt);
+  } else if (el.type === 'image') {
+    if (el.crop) (copy as ImageEl).crop = { ...el.crop };
+  }
+  return copy;
+}
+
+/** 文档快照：元素逐个浅拷贝，图片字符串共享 */
+export function cloneElements(els: El[]): El[] {
+  const out: El[] = new Array(els.length);
+  for (let i = 0; i < els.length; i++) out[i] = cloneEl(els[i]);
+  return out;
 }
 
 export function rotationOf(el: El): number {
@@ -280,6 +309,14 @@ export function distributeDeltas(rects: Rect[], axis: 'x' | 'y'): Pt[] {
   return deltas;
 }
 
+/** 文本列表行前缀（项目符号/数字编号） */
+export function listLines(text: string, bullets?: boolean, numbered?: boolean): string[] {
+  const lines = text.split('\n');
+  if (numbered) return lines.map((line, index) => (line ? `${index + 1}. ${line}` : line));
+  if (bullets) return lines.map((line) => (line ? '• ' + line : line));
+  return lines;
+}
+
 export function dashArray(dash: Dash | undefined, width: number): number[] | null {
   if (!dash || dash === 'solid') return null;
   const w = Math.max(1, width);
@@ -318,6 +355,82 @@ export function smoothPathD(points: Pt[]): string {
   return d;
 }
 
+/**
+ * 增量笔迹路径：在已有 d 串后追加新点，避免每次 pointermove 重建整条路径。
+ * 追加规则与 smoothPathD 一致：每加入一个点 P(n)，
+ *   - 之前的中点 M(n-1) 作为上一段的控制点（Q P(n-1) M(n-1)）已经写入
+ *   - 新增段为 Q P(n-1) M(n)，并把末点改为 L P(n)
+ */
+export class InkPathBuilder {
+  private d = '';
+  private count = 0;
+  private lastX = 0;
+  private lastY = 0;
+
+  constructor(points?: Pt[]) {
+    if (points && points.length) this.reset(points);
+  }
+
+  reset(points: Pt[]): void {
+    this.count = points.length;
+    if (!points.length) {
+      this.d = '';
+      return;
+    }
+    if (points.length === 1) {
+      this.d = `M ${points[0][0]} ${points[0][1]} l 0.01 0`;
+      this.lastX = points[0][0];
+      this.lastY = points[0][1];
+      return;
+    }
+    let d = `M ${points[0][0]} ${points[0][1]}`;
+    for (let i = 1; i < points.length - 1; i++) {
+      const mx = (points[i][0] + points[i + 1][0]) / 2;
+      const my = (points[i][1] + points[i + 1][1]) / 2;
+      d += ` Q ${points[i][0]} ${points[i][1]} ${mx} ${my}`;
+    }
+    const last = points[points.length - 1];
+    d += ` L ${last[0]} ${last[1]}`;
+    this.d = d;
+    this.lastX = last[0];
+    this.lastY = last[1];
+  }
+
+  /** 追加一个点，返回新的完整 d 串 */
+  push(p: Pt): string {
+    const n = this.count;
+    if (n === 0) {
+      this.d = `M ${p[0]} ${p[1]} l 0.01 0`;
+      this.count = 1;
+      this.lastX = p[0];
+      this.lastY = p[1];
+      return this.d;
+    }
+    if (n === 1) {
+      // 之前是 "M x y l 0.01 0"，替换为正常路径
+      this.d = `M ${this.lastX} ${this.lastY} L ${p[0]} ${p[1]}`;
+      this.count = 2;
+      this.lastX = p[0];
+      this.lastY = p[1];
+      return this.d;
+    }
+    // 旧的 "L last" 需要改成 "Q prev mid" + "L new"
+    const px = this.lastX;
+    const py = this.lastY;
+    const mx = (px + p[0]) / 2;
+    const my = (py + p[1]) / 2;
+    this.d = this.d.slice(0, this.d.lastIndexOf(' L ')) + ` Q ${px} ${py} ${mx} ${my} L ${p[0]} ${p[1]}`;
+    this.count = n + 1;
+    this.lastX = p[0];
+    this.lastY = p[1];
+    return this.d;
+  }
+
+  get value(): string {
+    return this.d;
+  }
+}
+
 export function tracePoints(ctx: CanvasRenderingContext2D, points: Pt[]): void {
   if (!points.length) return;
   ctx.beginPath();
@@ -336,9 +449,28 @@ export function tracePoints(ctx: CanvasRenderingContext2D, points: Pt[]): void {
   ctx.lineTo(last[0], last[1]);
 }
 
+export function arrowRoutePoints(el: ArrowEl): Pt[] {
+  if (el.routing === 'orthogonal') {
+    const midX = (el.x1 + el.x2) / 2;
+    return [
+      [el.x1, el.y1],
+      [midX, el.y1],
+      [midX, el.y2],
+      [el.x2, el.y2]
+    ];
+  }
+  return [
+    [el.x1, el.y1],
+    [el.x2, el.y2]
+  ];
+}
+
 export function arrowHeadPoints(el: ArrowEl): [Pt, Pt] {
-  const dx = el.x2 - el.x1;
-  const dy = el.y2 - el.y1;
+  const points = arrowRoutePoints(el);
+  const from = points[points.length - 2] || points[0];
+  const to = points[points.length - 1];
+  const dx = to[0] - from[0];
+  const dy = to[1] - from[1];
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
@@ -346,24 +478,30 @@ export function arrowHeadPoints(el: ArrowEl): [Pt, Pt] {
   const angle = Math.PI / 7.2;
   const cos = Math.cos(angle);
   const sin = Math.sin(angle);
-  const bx = el.x2 - ux * head;
-  const by = el.y2 - uy * head;
+  const bx = to[0] - ux * head;
+  const by = to[1] - uy * head;
   const rotate = (sign: number): Pt => {
-    const vx = bx - el.x2;
-    const vy = by - el.y2;
-    return [el.x2 + vx * cos - sign * vy * sin, el.y2 + sign * vx * sin + vy * cos];
+    const vx = bx - to[0];
+    const vy = by - to[1];
+    return [to[0] + vx * cos - sign * vy * sin, to[1] + sign * vx * sin + vy * cos];
   };
   return [rotate(1), rotate(-1)];
 }
 
+function routeD(el: ArrowEl): string {
+  return arrowRoutePoints(el)
+    .map((point, index) => `${index === 0 ? 'M' : 'L'} ${point[0]} ${point[1]}`)
+    .join(' ');
+}
+
 export function arrowPathD(el: ArrowEl): string {
-  if (!el.head) return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2}`;
+  if (!el.head) return routeD(el);
   const [h1, h2] = arrowHeadPoints(el);
-  return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2} M ${h1[0]} ${h1[1]} L ${el.x2} ${el.y2} M ${h2[0]} ${h2[1]} L ${el.x2} ${el.y2}`;
+  return `${routeD(el)} M ${h1[0]} ${h1[1]} L ${el.x2} ${el.y2} M ${h2[0]} ${h2[1]} L ${el.x2} ${el.y2}`;
 }
 
 export function arrowShaftD(el: ArrowEl): string {
-  return `M ${el.x1} ${el.y1} L ${el.x2} ${el.y2}`;
+  return routeD(el);
 }
 
 export function arrowHeadPathD(el: ArrowEl): string | null {
@@ -391,6 +529,16 @@ export function polyVertices(el: PolyEl): Pt[] {
     }
     return pts;
   }
+  if (el.kind === 'hexagon') {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const pts: Pt[] = [];
+    for (let i = 0; i < 6; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI) / 3;
+      pts.push([cx + Math.cos(a) * (w / 2), cy + Math.sin(a) * (h / 2)]);
+    }
+    return pts;
+  }
   return [
     [x, y],
     [x + w, y],
@@ -400,6 +548,21 @@ export function polyVertices(el: PolyEl): Pt[] {
 }
 
 export function polyPathD(el: PolyEl): string {
+  const b0 = bounds(el);
+  if (el.kind === 'cylinder') {
+    const r = Math.min(b0.w / 2, Math.max(6, b0.h * 0.14));
+    return `M ${b0.x} ${b0.y + r} Q ${b0.x} ${b0.y} ${b0.x + b0.w / 2} ${b0.y} Q ${b0.x + b0.w} ${b0.y} ${b0.x + b0.w} ${b0.y + r} V ${b0.y + b0.h - r} Q ${b0.x + b0.w} ${b0.y + b0.h} ${b0.x + b0.w / 2} ${b0.y + b0.h} Q ${b0.x} ${b0.y + b0.h} ${b0.x} ${b0.y + b0.h - r} Z`;
+  }
+  if (el.kind === 'cloud') {
+    const x = b0.x;
+    const y = b0.y;
+    const w = b0.w;
+    const h = b0.h;
+    return `M ${x + w * 0.2} ${y + h * 0.75} Q ${x - w * 0.02} ${y + h * 0.55} ${x + w * 0.16} ${y + h * 0.38} Q ${x + w * 0.24} ${y + h * 0.08} ${x + w * 0.46} ${y + h * 0.24} Q ${x + w * 0.64} ${y + h * 0.02} ${x + w * 0.82} ${y + h * 0.3} Q ${x + w * 1.03} ${y + h * 0.44} ${x + w * 0.9} ${y + h * 0.72} Q ${x + w * 0.82} ${y + h * 0.98} ${x + w * 0.56} ${y + h * 0.85} Q ${x + w * 0.34} ${y + h * 1.02} ${x + w * 0.2} ${y + h * 0.75} Z`;
+  }
+  if (el.kind === 'lane') {
+    return `M ${b0.x} ${b0.y} H ${b0.x + b0.w} V ${b0.y + b0.h} H ${b0.x} Z`;
+  }
   if (el.kind === 'roundrect') {
     const b = bounds(el);
     const r = Math.min(el.radius || Math.min(b.w, b.h) * 0.15, b.w / 2, b.h / 2);
@@ -425,6 +588,16 @@ function pointInPolygon(p: Pt, verts: Pt[]): boolean {
     if (yi > p[1] !== yj > p[1] && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi || 0.000001) + xi) inside = !inside;
   }
   return inside;
+}
+
+/** 旋转元素边缘上的最近点（连接线吸附用） */
+export function nearestPointOnRotatedRect(el: El, p: Pt): Pt {
+  const b = bounds(el);
+  const rotation = rotationOf(el);
+  if (!rotation) return nearestPointOnRect(b, p);
+  const center = centerOf(el);
+  const local = rotatePoint(p, center, -rotation);
+  return rotatePoint(nearestPointOnRect(b, local), center, rotation);
 }
 
 export function nearestPointOnRect(b: Rect, p: Pt): Pt {
@@ -533,6 +706,16 @@ function hitEl(el: El, raw: Pt, tol: number): boolean {
   }
 }
 
+/** 可见元素：隐藏元素不参与适应内容、小地图、吸附目标等全局计算 */
+export function visibleElements(els: El[]): El[] {
+  return els.filter((el) => !el.hidden);
+}
+
+/** 自动选择（框选/全选/Tab）只命中可见且未锁定元素 */
+export function autoSelectableElements(els: El[]): El[] {
+  return els.filter((el) => !el.hidden && !el.locked);
+}
+
 export interface HitOptions {
   ignoreLocked?: boolean;
   ignoreHidden?: boolean;
@@ -554,7 +737,7 @@ const MAX_SRC = 96 * 1024 * 1024;
 const MAX_COORD = 1e7;
 const COLOR_RE = /^(#(?:[0-9a-f]{3,8})|rgba?\([0-9.,%\s/]+\)|transparent)$/i;
 const ALIGN = ['left', 'center', 'right'];
-const POLY_KINDS: PolyKind[] = ['triangle', 'diamond', 'star', 'roundrect'];
+const POLY_KINDS: PolyKind[] = ['triangle', 'diamond', 'star', 'roundrect', 'hexagon', 'cylinder', 'cloud', 'lane'];
 
 function num(value: unknown, max = MAX_COORD): number | null {
   return typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= max ? value : null;
@@ -636,9 +819,11 @@ export function sanitizeEl(raw: unknown): El | null {
           underline: bool(o.underline),
           strike: bool(o.strike),
           bullets: bool(o.bullets),
+          numbered: bool(o.numbered),
           align,
           sticky: bool(o.sticky),
-          stickyColor: str(o.stickyColor, 64) && COLOR_RE.test(String(o.stickyColor)) ? String(o.stickyColor) : undefined
+          stickyColor: str(o.stickyColor, 64) && COLOR_RE.test(String(o.stickyColor)) ? String(o.stickyColor) : undefined,
+          link: str(o.link, 2000) || undefined
         };
       }
       case 'image': {
@@ -716,7 +901,8 @@ export function sanitizeEl(raw: unknown): El | null {
           strokeWidth,
           fill: fillColor(o.fill),
           dash: dashValue(o.dash),
-          radius: o.type === 'rect' && radius !== null && radius > 0 ? radius : undefined
+          radius: o.type === 'rect' && radius !== null && radius > 0 ? radius : undefined,
+          label: str(o.label, 2000) || undefined
         };
       }
       case 'poly': {
@@ -740,7 +926,8 @@ export function sanitizeEl(raw: unknown): El | null {
           strokeWidth,
           fill: fillColor(o.fill),
           dash: dashValue(o.dash),
-          radius: radius !== null && radius > 0 ? radius : undefined
+          radius: radius !== null && radius > 0 ? radius : undefined,
+          label: str(o.label, 2000) || undefined
         };
       }
       case 'arrow': {
@@ -763,7 +950,9 @@ export function sanitizeEl(raw: unknown): El | null {
           dash: dashValue(o.dash),
           label: str(o.label, 2000) || undefined,
           fromId: str(o.fromId, 64) || undefined,
-          toId: str(o.toId, 64) || undefined
+          toId: str(o.toId, 64) || undefined,
+          routing: o.routing === 'orthogonal' ? 'orthogonal' : undefined,
+          startHead: bool(o.startHead)
         };
       }
       default:

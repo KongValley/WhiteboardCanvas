@@ -11,10 +11,14 @@ const resetBtn = document.getElementById('settings-reset') as HTMLButtonElement;
 const autosaveInput = document.getElementById('set-autosave') as HTMLInputElement;
 const closeSelect = document.getElementById('set-close') as HTMLSelectElement;
 const gpuInput = document.getElementById('set-gpu') as HTMLInputElement;
+const lowSpecInput = document.getElementById('set-low-spec') as HTMLInputElement;
 const backgroundSelect = document.getElementById('set-background') as HTMLSelectElement;
+const gridSizeSelect = document.getElementById('set-grid-size') as HTMLSelectElement;
 const themeSelect = document.getElementById('set-theme') as HTMLSelectElement;
 const languageSelect = document.getElementById('set-language') as HTMLSelectElement;
 const exportBgInput = document.getElementById('set-export-bg') as HTMLInputElement;
+const printSizeSelect = document.getElementById('set-print-size') as HTMLSelectElement;
+const printOrientationSelect = document.getElementById('set-print-orientation') as HTMLSelectElement;
 const assocBtn = document.getElementById('assoc-toggle') as HTMLButtonElement;
 const assocState = document.getElementById('assoc-state') as HTMLSpanElement;
 const formStatus = document.getElementById('settings-status') as HTMLDivElement;
@@ -42,7 +46,9 @@ const SHORTCUT_ACTIONS: { id: string; label: string; def: string }[] = [
 
 const RESERVED = new Set([
   'ctrl+s', 'ctrl+o', 'ctrl+n', 'ctrl+z', 'ctrl+y', 'ctrl+a', 'ctrl+d', 'ctrl+c', 'ctrl+x', 'ctrl+v',
-  'ctrl+e', 'ctrl+p', 'ctrl+f', 'ctrl+0', 'ctrl+=', 'ctrl+-', 'ctrl+shift+s', 'ctrl+shift+c', 'ctrl+shift+f'
+  'ctrl+e', 'ctrl+p', 'ctrl+f', 'ctrl+0', 'ctrl+=', 'ctrl+-', 'ctrl+shift+s', 'ctrl+shift+c', 'ctrl+shift+f',
+  'ctrl+shift+z', 'ctrl+shift+g', 'ctrl+shift+l', 'ctrl+shift+h', 'ctrl+shift+n', 'ctrl+]', 'ctrl+[',
+  'space', 'enter', 'tab', 'delete', 'backspace', 'i', '1', '2', '3', '4'
 ]);
 
 export function applyTheme(theme: 'light' | 'dark'): void {
@@ -60,10 +66,14 @@ function fillForm(): void {
   autosaveInput.value = String(state.settings.autosaveDelay);
   closeSelect.value = state.settings.closeBehavior;
   gpuInput.checked = state.settings.disableGpu;
+  lowSpecInput.checked = state.settings.lowSpec;
   backgroundSelect.value = state.settings.background;
+  gridSizeSelect.value = String(state.settings.gridSize);
   themeSelect.value = state.settings.theme;
   languageSelect.value = state.settings.language;
   exportBgInput.checked = state.settings.exportBackground;
+  printSizeSelect.value = state.settings.printPageSize;
+  printOrientationSelect.value = state.settings.printOrientation;
   pendingShortcuts = { ...state.settings.shortcuts };
   renderShortcuts();
   void refreshAssociation();
@@ -140,10 +150,14 @@ function readForm(): Partial<Settings> {
     autosaveDelay: delay,
     closeBehavior: closeValue === 'save' || closeValue === 'discard' ? closeValue : 'ask',
     disableGpu: gpuInput.checked,
+    lowSpec: lowSpecInput.checked,
     background: bg === 'dots' || bg === 'grid' || bg === 'plain' || bg === 'cream' ? bg : 'dots',
+    gridSize: [8, 16, 24, 32].includes(Number(gridSizeSelect.value)) ? Number(gridSizeSelect.value) : 24,
     theme: themeSelect.value === 'dark' ? 'dark' : 'light',
     language: languageSelect.value === 'en' ? 'en' : 'zh',
     exportBackground: exportBgInput.checked,
+    printPageSize: printSizeSelect.value === 'Letter' ? 'Letter' : 'A4',
+    printOrientation: printOrientationSelect.value === 'portrait' ? 'portrait' : 'landscape',
     shortcuts: { ...pendingShortcuts }
   };
 }
@@ -215,10 +229,14 @@ export function installSettings(saved: () => void): void {
     autosaveInput.value = String(DEFAULT_SETTINGS.autosaveDelay);
     closeSelect.value = DEFAULT_SETTINGS.closeBehavior;
     gpuInput.checked = DEFAULT_SETTINGS.disableGpu;
+    lowSpecInput.checked = DEFAULT_SETTINGS.lowSpec;
     backgroundSelect.value = DEFAULT_SETTINGS.background;
+    gridSizeSelect.value = String(DEFAULT_SETTINGS.gridSize);
     themeSelect.value = DEFAULT_SETTINGS.theme;
     languageSelect.value = DEFAULT_SETTINGS.language;
     exportBgInput.checked = DEFAULT_SETTINGS.exportBackground;
+    printSizeSelect.value = DEFAULT_SETTINGS.printPageSize;
+    printOrientationSelect.value = DEFAULT_SETTINGS.printOrientation;
     pendingShortcuts = {};
     renderShortcuts();
     formStatus.textContent = '已恢复默认值，点击“保存”生效';
